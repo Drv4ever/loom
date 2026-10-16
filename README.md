@@ -56,3 +56,5 @@ make check  # Go test/vet, frontend typecheck/lint, and both integration tests
 To run the built frontend locally, start `./bin/loom --demo --listen 127.0.0.1:8787 --data-dir .loom-demo` in one terminal and `cd web && bun run start` in another. The preview server uses the same local API and service-proxy routes as the development dashboard.
 
 See [docs/DEMO.md](docs/DEMO.md) for a short walkthrough of the demo and real-device setup.
+
+The independent review, verified behavior, and demo boundaries are recorded in [docs/VALIDATION.md](docs/VALIDATION.md).

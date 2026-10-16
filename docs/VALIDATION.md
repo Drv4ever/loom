@@ -36,7 +36,7 @@ Review identified and fixed a manifest retry bug that could mark a failed file a
 ## Scope to present accurately
 
 - This provides selected HTTP-service access and one-way folder replication over encrypted libp2p connections. It does not install a VPN adapter or route arbitrary operating-system traffic.
-- The three named demo peers are actual local processes within the Go application, not physical remote machines. Normal mode runs one peer per application instance.
+- The three named demo peers are real libp2p hosts inside one Go process, not physical remote machines. Normal mode runs one peer per application instance.
 - Folder sync transfers changed regular files, retains replaced receiver versions, and does not propagate deletions. It is not collaborative editing or a full backup product. Limits are 100 MiB per file and 1 GiB per scanned folder.
 - HTTP proxying is bounded and sandboxed. It does not promise arbitrary authenticated web apps, WebSockets, transparent absolute asset paths, or general TCP/UDP forwarding.
 - Devices sharing the network key are trusted members. There is no hosted account service, per-user ACL system, public relay fleet, or general Internet NAT-traversal guarantee. The demo includes a working private circuit relay; normal-device connectivity depends on reachable peer addresses and LAN discovery.
