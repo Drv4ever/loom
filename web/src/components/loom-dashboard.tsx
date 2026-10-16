@@ -85,6 +85,11 @@ export function LoomDashboard() {
   const [copiedAddress, setCopiedAddress] = useState("")
   const inFlight = useRef(false)
 
+  const navigateTo = (nextPage: PageKey) => {
+    setPage(nextPage)
+    window.scrollTo({ top: 0, behavior: "auto" })
+  }
+
   const refresh = useCallback(async (showLoading = false) => {
     if (inFlight.current) return
     inFlight.current = true
@@ -217,7 +222,7 @@ export function LoomDashboard() {
           href="#overview"
           onClick={(event) => {
             event.preventDefault()
-            setPage("overview")
+            navigateTo("overview")
           }}
         >
           <span className="brand-mark">
@@ -251,7 +256,7 @@ export function LoomDashboard() {
             <button
               key={id}
               className={`nav-item ${page === id ? "is-active" : ""}`}
-              onClick={() => setPage(id)}
+              onClick={() => navigateTo(id)}
               aria-current={page === id ? "page" : undefined}
             >
               <Icon size={17} strokeWidth={1.8} />
@@ -318,7 +323,7 @@ export function LoomDashboard() {
             <button
               className="avatar-button"
               title="Settings"
-              onClick={() => setPage("settings")}
+              onClick={() => navigateTo("settings")}
             >
               {initials(
                 state.devices.find((device) => device.self)?.name || "You"
@@ -410,7 +415,7 @@ export function LoomDashboard() {
                   "Sample change synced"
                 )
               }
-              onPage={setPage}
+              onPage={navigateTo}
               onSync={(folder) =>
                 void runAction(
                   `sync-${folder.id}`,
@@ -1936,6 +1941,7 @@ function StatusLabel({ status }: { status: string }) {
     "healthy",
     "synced",
     "online",
+    "published",
     "complete",
     "completed",
   ].includes(normal)
