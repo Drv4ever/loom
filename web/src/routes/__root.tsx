@@ -14,11 +14,19 @@ export const Route = createRootRoute({
       },
       {
         title: "Loom — Private network workspace",
-        description:
+      },
+      {
+        name: "description",
+        content:
           "A live view of your private device network, shared services, and synced folders.",
       },
     ],
     links: [
+      {
+        rel: "icon",
+        type: "image/svg+xml",
+        href: "/favicon.svg",
+      },
       {
         rel: "stylesheet",
         href: appCss,

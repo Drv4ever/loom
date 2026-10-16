@@ -3,3 +3,5 @@ bin/
 artifacts/
 *.log
 .DS_Store
+__pycache__/
+*.py[cod]
