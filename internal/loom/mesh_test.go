@@ -342,6 +342,17 @@ func TestDemoUsesRelayForProxyAndFolderTransfersAndReconnects(t *testing.T) {
 	t.Cleanup(func() { _ = app.Close(context.Background()) })
 	handler := app.Handler("127.0.0.1:8787")
 	state := app.State()
+	if len(state.Devices) != 3 || !state.Devices[0].Self || state.Devices[1].Name > state.Devices[2].Name {
+		t.Fatalf("devices are not ordered self-first then by name: %+v", state.Devices)
+	}
+	for i := 0; i < 5; i++ {
+		observed := app.State().Devices
+		for j := range state.Devices {
+			if state.Devices[j].ID != observed[j].ID {
+				t.Fatalf("device order changed between state reads: %v then %v", deviceIDs(state.Devices), deviceIDs(observed))
+			}
+		}
+	}
 	var linux Device
 	var statusService Service
 	for _, device := range state.Devices {
@@ -511,4 +522,12 @@ func waitFor(t *testing.T, timeout time.Duration, condition func() bool) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatal("condition did not become true before timeout")
+}
+
+func deviceIDs(devices []Device) []string {
+	ids := make([]string, len(devices))
+	for i, device := range devices {
+		ids[i] = device.ID
+	}
+	return ids
 }

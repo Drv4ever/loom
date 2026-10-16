@@ -533,6 +533,16 @@ func (a *App) State() State {
 	transferred := a.transferredBytes
 	peerCount := len(devices)
 	a.mu.RUnlock()
+	sort.Slice(devices, func(i, j int) bool {
+		if devices[i].Self != devices[j].Self {
+			return devices[i].Self
+		}
+		left, right := strings.ToLower(devices[i].Name), strings.ToLower(devices[j].Name)
+		if left != right {
+			return left < right
+		}
+		return devices[i].ID < devices[j].ID
+	})
 	sort.Slice(folders, func(i, j int) bool { return folders[i].Name < folders[j].Name })
 	sort.Slice(services, func(i, j int) bool { return services[i].Name < services[j].Name })
 	stats := Stats{OnlineDevices: 0, Services: len(services), TransferredBytes: transferred}
