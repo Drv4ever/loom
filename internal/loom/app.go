@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/client"
 	ma "github.com/multiformats/go-multiaddr"
@@ -76,6 +77,9 @@ type App struct {
 	peers            map[string]*peerEntry
 	services         map[string]ServiceRecord
 	remoteServices   map[string][]ServiceRecord
+	forceRelay       map[string]bool
+	relayInfos       map[string]peer.AddrInfo
+	lastDial         map[string]time.Time
 	folders          map[string]*folderEntry
 	activities       []Activity
 	transferredBytes int64
@@ -111,7 +115,7 @@ func New(ctx context.Context, config Config) (*App, error) {
 		name: config.Name, demo: config.Demo, connected: true, dataDir: dataDir,
 		statePath: filepath.Join(dataDir, "state.json"), networkKey: key, nodes: make(map[string]*Node),
 		peers: make(map[string]*peerEntry), services: make(map[string]ServiceRecord),
-		remoteServices: make(map[string][]ServiceRecord), folders: make(map[string]*folderEntry),
+		remoteServices: make(map[string][]ServiceRecord), forceRelay: make(map[string]bool), relayInfos: make(map[string]peer.AddrInfo), lastDial: make(map[string]time.Time), folders: make(map[string]*folderEntry),
 		started: time.Now(), ctx: appCtx, cancel: cancel, watcherDone: make(chan struct{}), apiListen: config.Listen,
 	}
 	hash := sha256.Sum256(key)
@@ -161,7 +165,9 @@ func loadNetworkKey(file, supplied string) ([]byte, error) {
 	}
 	existing, err := os.ReadFile(file)
 	if err == nil {
-		_ = os.Chmod(file, 0600)
+		if err := os.Chmod(file, 0600); err != nil {
+			return nil, fmt.Errorf("secure stored network key: %w", err)
+		}
 		stored, decodeErr := hex.DecodeString(strings.TrimSpace(string(existing)))
 		if decodeErr != nil || len(stored) != 32 {
 			return nil, fmt.Errorf("stored network key is invalid")
@@ -309,7 +315,6 @@ func (a *App) refreshPeers() {
 			continue
 		}
 		idString := id.String()
-		active[idString] = true
 		conns := a.main.Host.Network().ConnsToPeer(id)
 		if len(conns) == 0 {
 			continue
@@ -319,7 +324,24 @@ func (a *App) refreshPeers() {
 		if strings.Contains(addr.String(), "p2p-circuit") {
 			connection = "relay"
 		}
+		a.mu.RLock()
+		forceRelay := a.forceRelay[idString]
+		relayInfo := a.relayInfos[idString]
+		a.mu.RUnlock()
+		if forceRelay && connection != "relay" {
+			// The target can advertise its direct address during the relay handshake.
+			// The demo deliberately keeps this edge on the relay so the UI reflects
+			// the path actually used for service and folder traffic.
+			_ = a.main.Host.Network().ClosePeer(id)
+			continue
+		}
+		active[idString] = true
 		info := peer.AddrInfo{ID: id, Addrs: a.main.Host.Peerstore().Addrs(id)}
+		if forceRelay && connection == "relay" && len(relayInfo.Addrs) != 0 {
+			info = relayInfo
+			a.main.Host.Peerstore().ClearAddrs(id)
+			a.main.Host.Peerstore().SetAddrs(id, relayInfo.Addrs, 24*time.Hour)
+		}
 		summary := PeerSummary{}
 		ctx, cancel := context.WithTimeout(a.ctx, 2*time.Second)
 		if result, err := a.main.FetchInfo(ctx, id); err == nil {
@@ -354,9 +376,10 @@ func (a *App) refreshPeers() {
 		entry.Info = info
 		entry.Services = summary.Services
 		entry.Device.LatencyMs = 0
-		if len(info.Addrs) != 0 {
+		if len(info.Addrs) != 0 && !forceRelay {
 			a.main.Host.Peerstore().AddAddrs(id, info.Addrs, time.Hour*24)
 		}
+		a.updateFoldersForPeerLocked(idString, true)
 		if !wasOnline {
 			a.addActivityLocked("device", "Device connected", entry.Device.Name+" joined the private network.")
 		}
@@ -369,11 +392,50 @@ func (a *App) refreshPeers() {
 			entry.Device.Online = false
 			entry.Device.LastSeen = time.Now().UTC()
 			entry.Services = nil
+			a.updateFoldersForPeerLocked(id, false)
 			a.addActivityLocked("device", "Device disconnected", entry.Device.Name+" left the private network.")
+		}
+	}
+	var redial []peer.AddrInfo
+	now := time.Now()
+	if a.connected {
+		for id, entry := range a.peers {
+			if active[id] || entry.Info.ID == "" || now.Sub(a.lastDial[id]) < 8*time.Second {
+				continue
+			}
+			info := entry.Info
+			if a.forceRelay[id] && len(a.relayInfos[id].Addrs) != 0 {
+				info = a.relayInfos[id]
+				a.main.Host.Peerstore().ClearAddrs(info.ID)
+				a.main.Host.Peerstore().SetAddrs(info.ID, info.Addrs, 24*time.Hour)
+			}
+			if len(info.Addrs) == 0 {
+				continue
+			}
+			a.lastDial[id] = now
+			redial = append(redial, info)
 		}
 	}
 	_ = a.persistLocked()
 	a.mu.Unlock()
+	for _, info := range redial {
+		go func(info peer.AddrInfo) { _ = a.connectPeer(info) }(info)
+	}
+}
+
+func (a *App) updateFoldersForPeerLocked(peerID string, online bool) {
+	for _, folder := range a.folders {
+		if folder.Folder.PeerID != peerID || folder.Folder.Paused || folder.syncing {
+			continue
+		}
+		if online && folder.Folder.Status == "offline" {
+			folder.Folder.Status = "pending"
+			folder.Folder.Error = ""
+		} else if !online && folder.Folder.Status != "offline" {
+			folder.Folder.Status = "offline"
+			folder.Folder.Error = "device is offline"
+		}
+	}
 }
 
 func shortID(id string) string {
@@ -396,16 +458,30 @@ func (a *App) connectPeer(info peer.AddrInfo) error {
 	}
 	a.mu.RLock()
 	connected := a.connected
+	forceRelay := a.forceRelay[info.ID.String()]
+	if forceRelay && len(a.relayInfos[info.ID.String()].Addrs) != 0 {
+		info = a.relayInfos[info.ID.String()]
+	}
 	a.mu.RUnlock()
 	if !connected {
 		return fmt.Errorf("network is paused")
 	}
 	ctx, cancel := context.WithTimeout(a.ctx, 12*time.Second)
 	defer cancel()
+	if forceRelay {
+		ctx = network.WithAllowLimitedConn(ctx, "loom forced relay connection")
+		a.main.Host.Peerstore().ClearAddrs(info.ID)
+		a.main.Host.Peerstore().SetAddrs(info.ID, info.Addrs, 24*time.Hour)
+	}
 	if err := a.main.Host.Connect(ctx, info); err != nil {
 		return err
 	}
-	a.main.Host.Peerstore().AddAddrs(info.ID, info.Addrs, time.Hour*24)
+	if forceRelay {
+		a.main.Host.Peerstore().ClearAddrs(info.ID)
+		a.main.Host.Peerstore().SetAddrs(info.ID, info.Addrs, 24*time.Hour)
+	} else {
+		a.main.Host.Peerstore().AddAddrs(info.ID, info.Addrs, time.Hour*24)
+	}
 	a.refreshPeers()
 	return nil
 }
@@ -453,7 +529,7 @@ func (a *App) State() State {
 	for _, entry := range a.peers {
 		devices = append(devices, entry.Device)
 	}
-	activity := append([]Activity(nil), a.activities...)
+	activity := append(make([]Activity, 0, len(a.activities)), a.activities...)
 	transferred := a.transferredBytes
 	peerCount := len(devices)
 	a.mu.RUnlock()
@@ -542,7 +618,9 @@ func (a *App) startDemo(config Config) error {
 	a.main = primary
 	a.nodes[primary.Host.ID().String()] = primary
 	a.loadPersisted()
-	primary.SetEnabled(a.connected)
+	// Demo topology is also assembled on startup when a pause was persisted.
+	// The primary is disabled again after the relay route is ready.
+	primary.SetEnabled(true)
 	studio, err := NewNode(NodeOptions{Name: "Studio Workstation", Platform: "darwin", DataDir: studioDir, IdentityPath: filepath.Join(studioDir, "identity.key"), ReceiveDir: filepath.Join(studioDir, "received"), NetworkKey: a.networkKey, ListenAddress: "/ip4/127.0.0.1/tcp/0", RelayService: true, AllowLoopback: true})
 	if err != nil {
 		return err
@@ -554,6 +632,7 @@ func (a *App) startDemo(config Config) error {
 	}
 	a.nodes[studio.Host.ID().String()] = studio
 	a.nodes[linux.Host.ID().String()] = linux
+	a.forceRelay[linux.Host.ID().String()] = true
 	if err := a.startDemoWebService(studio, "studio-preview", "Project preview", "Studio Workstation"); err != nil {
 		return err
 	}
@@ -582,6 +661,10 @@ func (a *App) startDemo(config Config) error {
 	if len(relayAddresses) == 0 {
 		return fmt.Errorf("Studio relay did not advertise a listener")
 	}
+	a.main.Host.Peerstore().SetAddrs(linux.Host.ID(), relayAddresses, time.Hour*24)
+	a.mu.Lock()
+	a.relayInfos[linux.Host.ID().String()] = peer.AddrInfo{ID: linux.Host.ID(), Addrs: relayAddresses}
+	a.mu.Unlock()
 	if err := a.main.Host.Connect(ctx, peer.AddrInfo{ID: linux.Host.ID(), Addrs: relayAddresses}); err != nil {
 		return fmt.Errorf("connect Linux demo peer through Studio relay: %w", err)
 	}
@@ -589,8 +672,37 @@ func (a *App) startDemo(config Config) error {
 	if err := a.prepareDemoFolder(linux); err != nil {
 		return err
 	}
+	go a.renewDemoRelay(studio, linux)
+	if !a.connected {
+		// Refresh once while bootstrap connections are live so their current
+		// addresses are persisted for an explicit later resume.
+		a.refreshPeers()
+		for _, id := range primary.Host.Network().Peers() {
+			_ = primary.Host.Network().ClosePeer(id)
+		}
+		primary.SetEnabled(false)
+	}
 	a.refreshPeers()
 	return nil
+}
+
+func (a *App) renewDemoRelay(relayNode, target *Node) {
+	ticker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-a.ctx.Done():
+			return
+		case <-ticker.C:
+			ctx, cancel := context.WithTimeout(a.ctx, 12*time.Second)
+			relayInfo := peer.AddrInfo{ID: relayNode.Host.ID(), Addrs: relayNode.Host.Addrs()}
+			if target.Host.Network().Connectedness(relayNode.Host.ID()) == network.NotConnected {
+				_ = target.Host.Connect(ctx, relayInfo)
+			}
+			_, _ = client.Reserve(ctx, target.Host, relayInfo)
+			cancel()
+		}
+	}
 }
 
 func (a *App) startDemoWebService(node *Node, id, name, deviceName string) error {
@@ -653,13 +765,25 @@ func (a *App) prepareDemoFolder(target *Node) error {
 	}
 	folder := Folder{ID: folderID, Name: "Shared demo assets", Path: source, PeerID: target.Host.ID().String(), PeerName: target.Name, Status: "pending", Progress: 0}
 	a.mu.Lock()
-	if _, exists := a.folders[folderID]; !exists {
-		a.folders[folderID] = &folderEntry{Folder: folder, manifest: make(map[string]string)}
+	entry := a.folders[folderID]
+	if entry == nil {
+		entry = &folderEntry{Folder: folder, manifest: make(map[string]string)}
+		a.folders[folderID] = entry
+	}
+	shouldSync := a.connected && !entry.Folder.Paused
+	if entry.Folder.Paused {
+		entry.Folder.Status = "paused"
+		entry.Folder.Error = ""
+	} else if !a.connected {
+		entry.Folder.Status = "offline"
+		entry.Folder.Error = "network is paused"
 	}
 	_ = a.persistLocked()
 	a.mu.Unlock()
-	if err := a.syncFolder(context.Background(), folderID); err != nil {
-		return fmt.Errorf("initial demo folder sync: %w", err)
+	if shouldSync {
+		if err := a.syncFolder(context.Background(), folderID); err != nil {
+			return fmt.Errorf("initial demo folder sync: %w", err)
+		}
 	}
 	return nil
 }

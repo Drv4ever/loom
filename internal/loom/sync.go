@@ -34,7 +34,8 @@ func (a *App) syncLoop() {
 			a.mu.RLock()
 			ids := make([]string, 0, len(a.folders))
 			for id, entry := range a.folders {
-				if !entry.Folder.Paused && !entry.syncing {
+				peer := a.peers[entry.Folder.PeerID]
+				if !entry.Folder.Paused && !entry.syncing && peer != nil && peer.Device.Online {
 					ids = append(ids, id)
 				}
 			}
@@ -117,7 +118,14 @@ func (a *App) setFolderPaused(id string, paused bool) (Folder, error) {
 			entry.cancel()
 		}
 	} else if entry.Folder.Status == "paused" {
-		entry.Folder.Status = "pending"
+		peer := a.peers[entry.Folder.PeerID]
+		if peer == nil || !peer.Device.Online {
+			entry.Folder.Status = "offline"
+			entry.Folder.Error = "device is offline"
+		} else {
+			entry.Folder.Status = "pending"
+			entry.Folder.Error = ""
+		}
 	}
 	_ = a.persistLocked()
 	folder := entry.Folder

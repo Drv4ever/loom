@@ -127,9 +127,12 @@ func NewNode(opts NodeOptions) (*Node, error) {
 	if opts.RelayService {
 		libp2pOptions = append(libp2pOptions, libp2p.ForceReachabilityPublic())
 		if opts.AllowLoopback {
-			libp2pOptions = append(libp2pOptions, libp2p.EnableRelayService(relay.WithReservationAddressFilter(func(ma.Multiaddr) bool { return true })))
+			libp2pOptions = append(libp2pOptions, libp2p.EnableRelayService(
+				relay.WithLimit(&relay.RelayLimit{Duration: 30 * time.Minute, Data: 1 << 30}),
+				relay.WithReservationAddressFilter(func(ma.Multiaddr) bool { return true }),
+			))
 		} else {
-			libp2pOptions = append(libp2pOptions, libp2p.EnableRelayService())
+			libp2pOptions = append(libp2pOptions, libp2p.EnableRelayService(relay.WithLimit(&relay.RelayLimit{Duration: 30 * time.Minute, Data: 1 << 30})))
 		}
 	}
 	h, err := libp2p.New(libp2pOptions...)

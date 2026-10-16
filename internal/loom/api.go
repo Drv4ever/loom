@@ -269,12 +269,17 @@ func (a *App) handleNetwork(w http.ResponseWriter, r *http.Request) {
 	peerIDs := make([]peer.ID, 0, len(a.peers))
 	for _, entry := range a.peers {
 		if entry.Info.ID != "" {
-			peerAddrs = append(peerAddrs, entry.Info)
+			info := entry.Info
+			if relayInfo, ok := a.relayInfos[info.ID.String()]; ok && len(relayInfo.Addrs) != 0 {
+				info = relayInfo
+			}
+			peerAddrs = append(peerAddrs, info)
 			peerIDs = append(peerIDs, entry.Info.ID)
 		}
 		if !body.Connected {
 			entry.Device.Online = false
 			entry.Services = nil
+			a.updateFoldersForPeerLocked(entry.Device.ID, false)
 		}
 	}
 	if !body.Connected {
@@ -295,8 +300,18 @@ func (a *App) handleNetwork(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		for _, info := range peerAddrs {
+			if a.forceRelay[info.ID.String()] && len(info.Addrs) > 0 {
+				a.main.Host.Peerstore().ClearAddrs(info.ID)
+				a.main.Host.Peerstore().SetAddrs(info.ID, info.Addrs, 24*time.Hour)
+			}
 			ctx, cancel := context.WithTimeout(a.ctx, 8*time.Second)
-			_ = a.main.Host.Connect(ctx, info)
+			if a.forceRelay[info.ID.String()] {
+				ctx = network.WithAllowLimitedConn(ctx, "loom forced relay connection")
+			}
+			if err := a.main.Host.Connect(ctx, info); err == nil && a.forceRelay[info.ID.String()] {
+				a.main.Host.Peerstore().ClearAddrs(info.ID)
+				a.main.Host.Peerstore().SetAddrs(info.ID, info.Addrs, 24*time.Hour)
+			}
 			cancel()
 		}
 		a.refreshPeers()
