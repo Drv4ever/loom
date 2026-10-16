@@ -2036,7 +2036,10 @@ function Dialog({
   useEffect(() => {
     const element = dialogRef.current
     if (!element) return
-    if (open && !element.open) element.showModal()
+    if (open && !element.open) {
+      element.showModal()
+      element.querySelector<HTMLElement>("input, select, textarea")?.focus()
+    }
     if (!open && element.open) element.close()
   }, [open])
   return (
@@ -2190,9 +2193,9 @@ function formatBytes(bytes: number) {
 function formatRelativeTime(value: string) {
   if (!value) return "—"
   const time = new Date(value).getTime()
-  if (Number.isNaN(time)) return value
+  if (!Number.isFinite(time) || time <= 0) return "—"
   const seconds = Math.max(0, Math.floor((Date.now() - time) / 1000))
-  if (seconds < 45) return "Just now"
+  if (seconds < 60) return "Just now"
   if (seconds < 3600) return `${Math.floor(seconds / 60)} min ago`
   if (seconds < 86400) return `${Math.floor(seconds / 3600)} hr ago`
   return `${Math.floor(seconds / 86400)} days ago`
