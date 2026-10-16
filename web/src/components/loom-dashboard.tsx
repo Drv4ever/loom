@@ -82,6 +82,7 @@ export function LoomDashboard() {
   const [diagnostics, setDiagnostics] = useState<Diagnostics | null>(null)
   const [diagnosticsLoading, setDiagnosticsLoading] = useState(false)
   const [copied, setCopied] = useState(false)
+  const [copiedAddress, setCopiedAddress] = useState("")
   const inFlight = useRef(false)
 
   const refresh = useCallback(async (showLoading = false) => {
@@ -156,6 +157,7 @@ export function LoomDashboard() {
 
   const openDiagnostics = async () => {
     setDialog("diagnostics")
+    setActionError("")
     setDiagnostics(null)
     setDiagnosticsLoading(true)
     try {
@@ -185,7 +187,11 @@ export function LoomDashboard() {
     try {
       await navigator.clipboard.writeText(value)
       setCopied(true)
-      window.setTimeout(() => setCopied(false), 1800)
+      setCopiedAddress(value)
+      window.setTimeout(() => {
+        setCopied(false)
+        setCopiedAddress("")
+      }, 1800)
     } catch {
       setActionError("Clipboard access is unavailable in this browser")
     }
@@ -303,6 +309,12 @@ export function LoomDashboard() {
               )}
               {state.network.connected ? "Connected" : "Paused"}
             </span>
+            {state.network.demo && (
+              <span className="topbar-demo-mark">
+                <i />
+                Local demo
+              </span>
+            )}
             <button
               className="avatar-button"
               title="Settings"
@@ -359,7 +371,7 @@ export function LoomDashboard() {
               <button onClick={() => void refresh()}>Retry</button>
             </div>
           )}
-          {actionError && (
+          {actionError && !dialog && (
             <div className="action-error" role="alert">
               <CircleHelp size={16} />
               <span>{actionError}</span>
@@ -505,7 +517,7 @@ export function LoomDashboard() {
               }
               onDiagnostics={() => void openDiagnostics()}
               onCopy={(address) => void copyText(address)}
-              copied={copied}
+              copiedAddress={copiedAddress}
             />
           )}
         </div>
@@ -517,6 +529,8 @@ export function LoomDashboard() {
         description="Connect another device to your private Loom network."
         onClose={() => setDialog(null)}
         busy={busyKey === "dialog"}
+        error={actionError}
+        onDismissError={() => setActionError("")}
       >
         <form
           onSubmit={(event) => {
@@ -560,6 +574,8 @@ export function LoomDashboard() {
         description="Share a local HTTP service with devices in this network."
         onClose={() => setDialog(null)}
         busy={busyKey === "dialog"}
+        error={actionError}
+        onDismissError={() => setActionError("")}
       >
         <form
           onSubmit={(event) => {
@@ -618,6 +634,8 @@ export function LoomDashboard() {
         description="Register a folder to sync with another device."
         onClose={() => setDialog(null)}
         busy={busyKey === "dialog"}
+        error={actionError}
+        onDismissError={() => setActionError("")}
       >
         <form
           onSubmit={(event) => {
@@ -711,6 +729,8 @@ export function LoomDashboard() {
         description="Read-only details for troubleshooting. Private keys and file contents are never shown."
         onClose={() => setDialog(null)}
         busy={diagnosticsLoading}
+        error={actionError}
+        onDismissError={() => setActionError("")}
       >
         {diagnosticsLoading ? (
           <div className="dialog-loading">
@@ -1225,9 +1245,7 @@ function FoldersPage({
                   </td>
                   <td>{folder.peerName}</td>
                   <td>
-                    <StatusLabel
-                      status={folder.paused ? "paused" : folder.status}
-                    />
+                    <StatusLabel status={folderStatus(folder)} />
                     {folder.error && (
                       <small className="folder-error">{folder.error}</small>
                     )}
@@ -1336,14 +1354,14 @@ function SettingsPage({
   onToggleNetwork,
   onDiagnostics,
   onCopy,
-  copied,
+  copiedAddress,
 }: {
   state: AppState
   busyKey: string
   onToggleNetwork: () => void
   onDiagnostics: () => void
   onCopy: (address: string) => void
-  copied: boolean
+  copiedAddress: string
 }) {
   const self = state.devices.find((device) => device.self)
   return (
@@ -1420,7 +1438,11 @@ function SettingsPage({
                   title="Copy address"
                   aria-label="Copy device address"
                 >
-                  {copied ? <Check size={15} /> : <Copy size={15} />}
+                  {copiedAddress === address ? (
+                    <Check size={15} />
+                  ) : (
+                    <Copy size={15} />
+                  )}
                 </button>
               </div>
             ))}
@@ -1733,7 +1755,7 @@ function FolderList({
             </small>
           </span>
           <span className="folder-state">
-            <StatusLabel status={folder.paused ? "paused" : folder.status} />
+            <StatusLabel status={folderStatus(folder)} />
             {!compact && (
               <small>
                 {folder.paused ? "Paused" : `${Math.round(folder.progress)}%`}
@@ -1945,6 +1967,11 @@ function FolderProgress({ folder }: { folder: SharedFolder }) {
   )
 }
 
+function folderStatus(folder: SharedFolder) {
+  if (folder.error) return "error"
+  return folder.paused ? "paused" : folder.status
+}
+
 function FormActions({
   onCancel,
   busy,
@@ -1985,6 +2012,8 @@ function Dialog({
   onClose,
   children,
   busy = false,
+  error,
+  onDismissError,
 }: {
   open: boolean
   title: string
@@ -1992,6 +2021,8 @@ function Dialog({
   onClose: () => void
   children: ReactNode
   busy?: boolean
+  error?: string
+  onDismissError?: () => void
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null)
   const titleId = useId()
@@ -2033,7 +2064,24 @@ function Dialog({
           <X size={18} />
         </button>
       </div>
-      <div className="dialog-body">{children}</div>
+      <div className="dialog-body">
+        {error && (
+          <div className="dialog-inline-error" role="alert">
+            <CircleHelp size={15} />
+            <span>{error}</span>
+            {onDismissError && (
+              <button
+                type="button"
+                aria-label="Dismiss error"
+                onClick={onDismissError}
+              >
+                <X size={14} />
+              </button>
+            )}
+          </div>
+        )}
+        {children}
+      </div>
     </dialog>
   )
 }
