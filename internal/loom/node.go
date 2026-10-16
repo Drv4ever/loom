@@ -18,6 +18,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -65,12 +66,14 @@ type Node struct {
 	ReceiveDir string
 	HistoryDir string
 
-	mu        sync.RWMutex
-	services  map[string]ServiceRecord
-	mdns      mdns.Service
-	closed    bool
-	enabled   *atomic.Bool
-	receiveMu sync.Mutex
+	mu           sync.RWMutex
+	services     map[string]ServiceRecord
+	received     map[string]ReceivedFolder
+	receivedPath string
+	mdns         mdns.Service
+	closed       bool
+	enabled      *atomic.Bool
+	receiveMu    sync.Mutex
 }
 
 type nodeGater struct{ enabled *atomic.Bool }
@@ -152,6 +155,11 @@ func NewNode(opts NodeOptions) (*Node, error) {
 	n := &Node{
 		Host: h, Name: opts.Name, Platform: opts.Platform, ReceiveDir: opts.ReceiveDir,
 		HistoryDir: filepath.Join(opts.DataDir, "history"), services: make(map[string]ServiceRecord), enabled: &enabled,
+		received: make(map[string]ReceivedFolder), receivedPath: filepath.Join(opts.DataDir, "received.json"),
+	}
+	if err := n.loadReceived(); err != nil {
+		_ = h.Close()
+		return nil, err
 	}
 	h.SetStreamHandler(infoProtocol, n.handleInfo)
 	h.SetStreamHandler(httpProtocol, n.handleHTTP)
@@ -224,7 +232,31 @@ func (n *Node) Addrs() []string {
 	for _, addr := range n.Host.Addrs() {
 		addresses = append(addresses, addr.Encapsulate(ma.StringCast("/p2p/"+n.Host.ID().String())).String())
 	}
+	// The dashboard's copy-address action uses the first address. Prefer a LAN
+	// address so that pasting it on another computer doesn't dial its loopback.
+	sort.SliceStable(addresses, func(i, j int) bool {
+		return addressRank(addresses[i]) < addressRank(addresses[j])
+	})
 	return addresses
+}
+
+func addressRank(address string) int {
+	addr, err := ma.NewMultiaddr(address)
+	if err != nil {
+		return 3
+	}
+	value, err := addr.ValueForProtocol(ma.P_IP4)
+	if err != nil {
+		value, _ = addr.ValueForProtocol(ma.P_IP6)
+	}
+	ip := net.ParseIP(value)
+	if ip == nil || ip.IsLoopback() || ip.IsUnspecified() {
+		return 2
+	}
+	if ip.IsPrivate() {
+		return 0
+	}
+	return 1
 }
 
 func (n *Node) LocalServices() []ServiceRecord {
@@ -435,7 +467,7 @@ func isLoopbackHost(hostname string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-func (n *Node) TransferFile(ctx context.Context, id peer.ID, folderID string, desc fileDescriptor, input io.Reader) (int64, error) {
+func (n *Node) TransferFile(ctx context.Context, id peer.ID, folderID string, desc fileDescriptor, input io.Reader, folderName ...string) (int64, error) {
 	stream, err := n.Host.NewStream(network.WithAllowLimitedConn(ctx, "loom folder sync"), id, folderProtocol)
 	if err != nil {
 		return 0, err
@@ -445,10 +477,15 @@ func (n *Node) TransferFile(ctx context.Context, id peer.ID, folderID string, de
 	if desc.Size < 0 || desc.Size > maxFileSize {
 		return 0, fmt.Errorf("file exceeds transfer limit")
 	}
+	name := folderID
+	if len(folderName) > 0 {
+		name = folderName[0]
+	}
 	header, err := json.Marshal(struct {
-		FolderID string         `json:"folderId"`
-		File     fileDescriptor `json:"file"`
-	}{FolderID: folderID, File: desc})
+		FolderID   string         `json:"folderId"`
+		FolderName string         `json:"folderName,omitempty"`
+		File       fileDescriptor `json:"file"`
+	}{FolderID: folderID, FolderName: name, File: desc})
 	if err != nil {
 		return 0, err
 	}
@@ -483,18 +520,19 @@ func (n *Node) handleFolder(stream network.Stream) {
 		return
 	}
 	var header struct {
-		FolderID string         `json:"folderId"`
-		File     fileDescriptor `json:"file"`
+		FolderID   string         `json:"folderId"`
+		FolderName string         `json:"folderName"`
+		File       fileDescriptor `json:"file"`
 	}
 	if err := readFrame(stream, &header, 16<<10); err != nil {
 		return
 	}
 	result := map[string]any{"ok": false, "error": "invalid transfer"}
-	if !isID(header.FolderID) || !validRelativePath(header.File.Path) || header.File.Size < 0 || header.File.Size > maxFileSize || !validSHA256(header.File.SHA256) {
+	if !isID(header.FolderID) || len(header.FolderName) > 120 || !validRelativePath(header.File.Path) || header.File.Size < 0 || header.File.Size > maxFileSize || !validSHA256(header.File.SHA256) {
 		_ = writeFrame(stream, mustJSON(result))
 		return
 	}
-	if err := n.receiveFile(stream, header.FolderID, header.File); err != nil {
+	if err := n.receiveFile(stream, header.FolderID, header.FolderName, header.File); err != nil {
 		result["error"] = err.Error()
 	} else {
 		result = map[string]any{"ok": true}
@@ -502,9 +540,16 @@ func (n *Node) handleFolder(stream network.Stream) {
 	_ = writeFrame(stream, mustJSON(result))
 }
 
-func (n *Node) receiveFile(stream network.Stream, folderID string, desc fileDescriptor) error {
+func (n *Node) receiveFile(stream network.Stream, folderID, folderName string, desc fileDescriptor) error {
 	n.receiveMu.Lock()
 	defer n.receiveMu.Unlock()
+	sender := stream.Conn().RemotePeer().String()
+	n.mu.RLock()
+	prior, exists := n.received[folderID]
+	n.mu.RUnlock()
+	if exists && prior.PeerID != sender {
+		return fmt.Errorf("folder belongs to a different sender")
+	}
 	receiveBase := filepath.Join(n.ReceiveDir, folderID)
 	historyBase := filepath.Join(n.HistoryDir, folderID)
 	if err := os.MkdirAll(receiveBase, 0700); err != nil {
@@ -606,7 +651,7 @@ func (n *Node) receiveFile(stream network.Stream, folderID string, desc fileDesc
 	if !desc.ModTime.IsZero() {
 		_ = root.Chtimes(desc.Path, desc.ModTime, desc.ModTime)
 	}
-	return nil
+	return n.recordReceived(folderID, folderName, sender, desc)
 }
 
 func copyIntoRoot(root *os.Root, destination string, input io.Reader, max int64) error {

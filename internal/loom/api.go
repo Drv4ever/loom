@@ -34,6 +34,7 @@ func (a *App) Handler(apiListen string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, map[string]bool{"ok": true}) })
 	mux.HandleFunc("GET /api/state", a.handleState)
+	mux.HandleFunc("GET /api/received/{id}/files/{path...}", a.handleReceivedFile)
 	mux.HandleFunc("POST /api/peers", a.handleJoin)
 	mux.HandleFunc("POST /api/services", a.handleAddService)
 	mux.HandleFunc("DELETE /api/services/{id}", a.handleDeleteService)

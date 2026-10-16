@@ -1,5 +1,7 @@
 # Three-minute Loom demo
 
+For a demo using **two physical computers on the same Wi-Fi**, use [the two-computer walkthrough](TWO-COMPUTER-DEMO.md), which includes the real-device launcher, receiving dashboard, and exact file-edit steps.
+
 Start the demo from the repository root with `make demo`, then open [http://127.0.0.1:3000](http://127.0.0.1:3000). It creates three actual local libp2p nodes: Primary laptop, Studio workstation, and Linux server. The labels identify them as demo fixtures; they are not physical remote computers. The Linux peer publishes a real local HTTP sample service and is reached through Studio's circuit relay.
 
 ## Talk track

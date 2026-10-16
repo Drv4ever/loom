@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -17,13 +18,29 @@ import (
 
 func main() {
 	var config loom.Config
+	var keyFile string
 	flag.BoolVar(&config.Demo, "demo", false, "start three real local demo peers, a relay, HTTP services, and sample folders")
 	flag.StringVar(&config.Name, "name", "", "device name (normal mode)")
 	flag.StringVar(&config.Listen, "listen", "127.0.0.1:8787", "loopback HTTP API address")
 	flag.StringVar(&config.DataDir, "data-dir", ".loom", "directory for identity, network key, state, and received files")
 	flag.StringVar(&config.NetworkKey, "network-key", "", "64-character hex private-network key (created and persisted when omitted)")
+	flag.StringVar(&keyFile, "network-key-file", "", "read the shared private-network key from a file")
+	flag.StringVar(&config.PeerListen, "peer-listen", "/ip4/0.0.0.0/tcp/0", "libp2p listen multiaddress; use /ip4/0.0.0.0/tcp/4001 for a fixed LAN port")
 	flag.BoolVar(&config.Relay, "relay", false, "offer this device as a libp2p circuit relay")
 	flag.Parse()
+	if keyFile != "" {
+		if config.NetworkKey != "" {
+			log.Fatal("use either --network-key or --network-key-file")
+		}
+		key, err := os.ReadFile(keyFile)
+		if err != nil {
+			log.Fatalf("read network key file: %v", err)
+		}
+		config.NetworkKey = strings.TrimSpace(string(key))
+		if config.NetworkKey == "" {
+			log.Fatal("network key file is empty")
+		}
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

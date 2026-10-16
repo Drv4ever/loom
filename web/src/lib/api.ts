@@ -55,11 +55,23 @@ export type Activity = {
   time: string
 }
 
+export type ReceivedFolder = {
+  id: string
+  name: string
+  path: string
+  peerId: string
+  peerName: string
+  files: { path: string; size: number; sha256: string }[]
+  bytes: number
+  lastReceived: string
+}
+
 export type AppState = {
   network: Network
   devices: Device[]
   services: Service[]
   folders: Folder[]
+  receivedFolders?: ReceivedFolder[]
   activity: Activity[]
   stats: {
     onlineDevices: number

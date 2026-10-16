@@ -155,6 +155,7 @@ class LoomProcess:
 		self.data_dir = data_dir
 		self.log_path = log_path
 		self.network_key = network_key
+		self.peer_port = reserve_port()
 		self.process: subprocess.Popen[bytes] | None = None
 
 	@property
@@ -170,7 +171,9 @@ class LoomProcess:
 		log_file = self.log_path.open("ab")
 		try:
 			self.process = subprocess.Popen(
-				[str(self.binary), "--name", self.name, "--listen", f"127.0.0.1:{self.port}", "--data-dir", str(self.data_dir)],
+				[str(self.binary), "--name", self.name, "--listen", f"127.0.0.1:{self.port}",
+				 "--peer-listen", f"/ip4/0.0.0.0/tcp/{self.peer_port}",
+				 "--network-key-file", str(key_file), "--data-dir", str(self.data_dir)],
 				cwd=ROOT,
 				stdout=log_file,
 				stderr=subprocess.STDOUT,
@@ -277,6 +280,8 @@ def run_checks(binary: Path, scratch: Path, network_key: str) -> None:
 		require(peer_a_id and peer_b_id and peer_a_id != peer_b_id, "normal nodes must have distinct persistent peer identities")
 		require(state_a.get("network", {}).get("demo") is not True and state_b.get("network", {}).get("demo") is not True,
 			"peer integration test must start normal-mode nodes, not demo nodes")
+		require(any(f"/tcp/{peer_b.peer_port}/" in addr for addr in state_b["network"]["addresses"]),
+			"configured fixed peer port was not advertised")
 		discovery = discover_peer(peer_a.base_url, peer_b.base_url, peer_b_id, "initial connection")
 
 		fixture_url = f"http://127.0.0.1:{server.server_port}"
@@ -302,11 +307,40 @@ def run_checks(binary: Path, scratch: Path, network_key: str) -> None:
 		folder_id = folder.get("id")
 		require(isinstance(folder_id, str) and folder_id, "folder registration did not return an id")
 		received = peer_b.data_dir / "received" / folder_id / file_path.name
-		sync_folder(peer_a.base_url, folder_id)
 		wait_file(received, first_bytes)
 		require(hashlib.sha256(received.read_bytes()).digest() == hashlib.sha256(first_bytes).digest(),
 			"initial receiver file hash did not match the source")
-		print("PASS selected folder transferred byte-for-byte to Peer B's managed receive directory")
+		def receipt_matches(base_url: str, expected_id: str, expected_name: str, expected_sender: str, expected: bytes) -> bool:
+			for item in get_state(base_url).get("receivedFolders", []):
+				if item.get("id") == expected_id:
+					return (item.get("name") == expected_name and item.get("peerId") == expected_sender
+						and item.get("bytes") == len(expected) and len(item.get("files", [])) == 1
+						and item["files"][0].get("sha256") == hashlib.sha256(expected).hexdigest())
+			return False
+
+		wait_for("received folder in Peer B dashboard state",
+			lambda: receipt_matches(peer_b.base_url, folder_id, "Peer smoke folder", peer_a_id, first_bytes), 10.0)
+		download_path = f"/api/received/{folder_id}/files/{file_path.name}"
+		status, _, downloaded = request(peer_b.base_url, download_path)
+		require(status == 200 and downloaded == first_bytes, "received-file download differs from transferred bytes")
+		print("PASS automatic byte-for-byte folder transfer, receiver dashboard metadata, and file download")
+
+		# Share a distinct source in the opposite direction, as in the two-computer demo.
+		reverse_source = scratch / "reverse-source"
+		reverse_source.mkdir()
+		reverse_name = "reply #1.txt"
+		reverse_bytes = b"Reply from Peer B to Peer A.\n"
+		(reverse_source / reverse_name).write_bytes(reverse_bytes)
+		reverse_folder = api_json(peer_b.base_url, "/api/folders", "POST", {
+			"path": str(reverse_source), "peerId": peer_a_id, "name": "Peer B replies",
+		})
+		wait_file(peer_a.data_dir / "received" / reverse_folder["id"] / reverse_name, reverse_bytes)
+		wait_for("reverse transfer receipt", lambda: receipt_matches(
+			peer_a.base_url, reverse_folder["id"], "Peer B replies", peer_b_id, reverse_bytes), 10.0)
+		status, _, downloaded = request(peer_a.base_url,
+			f"/api/received/{reverse_folder['id']}/files/{urllib.parse.quote(reverse_name, safe='')}")
+		require(status == 200 and downloaded == reverse_bytes, "encoded filename download failed")
+		print("PASS the second computer can also share a separate folder back to the first")
 
 		peer_b.stop()
 		wait_peer(peer_a.base_url, peer_b_id, False, timeout=20.0)
@@ -317,6 +351,8 @@ def run_checks(binary: Path, scratch: Path, network_key: str) -> None:
 			"Peer B identity did not persist across restart")
 		require(received.is_file() and received.read_bytes() == first_bytes,
 			"Peer B's managed received file did not persist across restart")
+		require(receipt_matches(peer_b.base_url, folder_id, "Peer smoke folder", peer_a_id, first_bytes),
+			"receiver dashboard metadata did not persist across restart")
 		persisted_service = find_service(restarted_state, peer_b_id, service_id)
 		require(persisted_service is not None, "Peer B's published service did not persist across restart")
 		require(persisted_service.get("name") == "Peer B fixture" and persisted_service.get("target") == fixture_url,
@@ -331,9 +367,22 @@ def run_checks(binary: Path, scratch: Path, network_key: str) -> None:
 		get_proxy(peer_a.base_url, remote_service.get("url", ""), FixtureHandler.body)
 
 		file_path.write_bytes(second_bytes)
-		sync_folder(peer_a.base_url, folder_id)
 		wait_file(received, second_bytes)
-		print("PASS Peer B identity and service persisted, reconnected, and accepted a recovered folder transfer")
+		wait_for("edited file receipt", lambda: receipt_matches(
+			peer_b.base_url, folder_id, "Peer smoke folder", peer_a_id, second_bytes), 10.0)
+		print("PASS Peer B identity, received folders, and service persisted; edits synced automatically after restart")
+
+		# Restart the sender too: persisted manifests must still notice new nested files.
+		peer_a.stop()
+		peer_a.start()
+		peer_a.wait_ready()
+		discover_peer(peer_a.base_url, peer_b.base_url, peer_b_id, "sender restart")
+		nested = source / "nested" / "new.bin"
+		nested.parent.mkdir()
+		nested_bytes = bytes(range(256)) * 64
+		nested.write_bytes(nested_bytes)
+		wait_file(peer_b.data_dir / "received" / folder_id / "nested" / "new.bin", nested_bytes)
+		print("PASS new nested binary files sync automatically after the sender restarts")
 		if discovery == "manual" or discovery_after_restart == "manual":
 			print("NOTE This run used the advertised multiaddress fallback where mDNS discovery was not observed.")
 		else:

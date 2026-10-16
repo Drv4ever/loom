@@ -62,6 +62,17 @@ type Activity struct {
 	Time   time.Time `json:"time"`
 }
 
+type ReceivedFolder struct {
+	ID           string           `json:"id"`
+	Name         string           `json:"name"`
+	Path         string           `json:"path"`
+	PeerID       string           `json:"peerId"`
+	PeerName     string           `json:"peerName"`
+	Files        []fileDescriptor `json:"files"`
+	Bytes        int64            `json:"bytes"`
+	LastReceived time.Time        `json:"lastReceived"`
+}
+
 type Stats struct {
 	OnlineDevices    int   `json:"onlineDevices"`
 	Services         int   `json:"services"`
@@ -70,12 +81,13 @@ type Stats struct {
 }
 
 type State struct {
-	Network  NetworkState `json:"network"`
-	Devices  []Device     `json:"devices"`
-	Services []Service    `json:"services"`
-	Folders  []Folder     `json:"folders"`
-	Activity []Activity   `json:"activity"`
-	Stats    Stats        `json:"stats"`
+	Network         NetworkState     `json:"network"`
+	Devices         []Device         `json:"devices"`
+	Services        []Service        `json:"services"`
+	Folders         []Folder         `json:"folders"`
+	ReceivedFolders []ReceivedFolder `json:"receivedFolders"`
+	Activity        []Activity       `json:"activity"`
+	Stats           Stats            `json:"stats"`
 }
 
 type ServiceRecord struct {

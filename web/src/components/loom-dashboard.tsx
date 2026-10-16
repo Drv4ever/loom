@@ -388,6 +388,8 @@ export function LoomDashboard() {
             <FoldersPage
               state={state}
               busyKey={busyKey}
+              onCopyPath={(path) => void copyText(path)}
+              copiedPath={copiedAddress}
               onAdd={() => openDialog("folder")}
               onSync={(folder) =>
                 void runAction(
@@ -608,7 +610,8 @@ export function LoomDashboard() {
           />
           <p className="field-help">
             Enter an absolute path. The browser cannot browse folders on this
-            device; files stay in their selected source folder.
+            device. New and edited files copy to the selected device every two
+            seconds. Each folder sends one way; deletions are not copied.
           </p>
           <label
             className="field-label field-label-spaced"
@@ -1126,6 +1129,8 @@ function FoldersPage({
   onSync,
   onPause,
   onRemove,
+  onCopyPath,
+  copiedPath,
 }: {
   state: AppState
   busyKey: string
@@ -1133,117 +1138,209 @@ function FoldersPage({
   onSync: (folder: SharedFolder) => void
   onPause: (folder: SharedFolder) => void
   onRemove: (folder: SharedFolder) => void
+  onCopyPath: (path: string) => void
+  copiedPath: string
 }) {
   return (
-    <section className="panel data-panel">
-      <PanelHeader title="Synced folders" icon={<FolderSync size={17} />} />
-      {state.folders.length ? (
-        <div className="table-scroll">
-          <table>
-            <thead>
-              <tr>
-                <th>Folder</th>
-                <th>Device</th>
-                <th>Status</th>
-                <th>Contents</th>
-                <th>Last sync</th>
-                <th className="th-actions">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {state.folders.map((folder) => (
-                <tr key={folder.id}>
-                  <td>
-                    <div className="table-primary">
-                      <span className="row-icon folder-row-icon">
-                        <Folder size={16} />
-                      </span>
-                      <span>
-                        <strong>{folder.name}</strong>
-                        <small className="mono-cell">{folder.path}</small>
-                      </span>
-                    </div>
-                  </td>
-                  <td>{folder.peerName || "Unknown device"}</td>
-                  <td>
-                    <StatusLabel status={folderStatus(folder)} />
-                    {folder.error && (
-                      <small className="folder-error">{folder.error}</small>
-                    )}
-                    <FolderProgress folder={folder} />
-                  </td>
-                  <td>
-                    {folder.files} files
-                    <span className="muted-cell">
-                      {" "}
-                      · {formatBytes(folder.bytes)}
-                    </span>
-                  </td>
-                  <td>{formatRelativeTime(folder.lastSync)}</td>
-                  <td>
-                    <div className="row-actions">
-                      <button
-                        className="icon-action"
-                        onClick={() => onSync(folder)}
-                        disabled={busyKey === `sync-${folder.id}`}
-                        aria-label={`Sync ${folder.name}`}
-                        title="Sync now"
-                      >
-                        {busyKey === `sync-${folder.id}` ? (
-                          <LoaderCircle size={16} className="spin" />
-                        ) : (
-                          <RefreshCw size={16} />
-                        )}
-                      </button>
-                      <button
-                        className="icon-action"
-                        onClick={() => onPause(folder)}
-                        disabled={busyKey === `pause-${folder.id}`}
-                        aria-label={
-                          folder.paused
-                            ? `Resume ${folder.name}`
-                            : `Pause ${folder.name}`
-                        }
-                        title={folder.paused ? "Resume sync" : "Pause sync"}
-                      >
-                        {folder.paused ? (
-                          <Radio size={16} />
-                        ) : (
-                          <WifiOff size={16} />
-                        )}
-                      </button>
-                      <button
-                        className="icon-action danger-action"
-                        onClick={() => onRemove(folder)}
-                        disabled={busyKey === `remove-folder-${folder.id}`}
-                        aria-label={`Remove ${folder.name}`}
-                        title="Stop tracking"
-                      >
-                        {busyKey === `remove-folder-${folder.id}` ? (
-                          <LoaderCircle size={16} className="spin" />
-                        ) : (
-                          <Trash2 size={16} />
-                        )}
-                      </button>
-                    </div>
-                  </td>
+    <div className="folder-panels">
+      <section className="panel data-panel">
+        <PanelHeader title="Sending folders" icon={<FolderSync size={17} />} />
+        {state.folders.length ? (
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Folder</th>
+                  <th>Device</th>
+                  <th>Status</th>
+                  <th>Contents</th>
+                  <th>Last sync</th>
+                  <th className="th-actions">Actions</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ) : (
-        <EmptyBlock
-          icon={<Folder size={20} />}
-          title="No folders syncing"
-          action={
-            <button className="button button-primary" onClick={onAdd}>
-              <Plus size={15} /> Add folder
-            </button>
-          }
-        />
-      )}
-    </section>
+              </thead>
+              <tbody>
+                {state.folders.map((folder) => (
+                  <tr key={folder.id}>
+                    <td>
+                      <div className="table-primary">
+                        <span className="row-icon folder-row-icon">
+                          <Folder size={16} />
+                        </span>
+                        <span>
+                          <strong>{folder.name}</strong>
+                          <small className="mono-cell" title={folder.path}>
+                            {folder.path}
+                          </small>
+                          <button
+                            className="text-button"
+                            onClick={() => onCopyPath(folder.path)}
+                          >
+                            {copiedPath === folder.path
+                              ? "Copied path"
+                              : "Copy path"}
+                          </button>
+                        </span>
+                      </div>
+                    </td>
+                    <td>{folder.peerName || "Unknown device"}</td>
+                    <td>
+                      <StatusLabel status={folderStatus(folder)} />
+                      {folder.error && (
+                        <small className="folder-error">{folder.error}</small>
+                      )}
+                      <FolderProgress folder={folder} />
+                    </td>
+                    <td>
+                      {folder.files} files
+                      <span className="muted-cell">
+                        {" "}
+                        · {formatBytes(folder.bytes)}
+                      </span>
+                    </td>
+                    <td>{formatRelativeTime(folder.lastSync)}</td>
+                    <td>
+                      <div className="row-actions">
+                        <button
+                          className="icon-action"
+                          onClick={() => onSync(folder)}
+                          disabled={busyKey === `sync-${folder.id}`}
+                          aria-label={`Sync ${folder.name}`}
+                          title="Sync now"
+                        >
+                          {busyKey === `sync-${folder.id}` ? (
+                            <LoaderCircle size={16} className="spin" />
+                          ) : (
+                            <RefreshCw size={16} />
+                          )}
+                        </button>
+                        <button
+                          className="icon-action"
+                          onClick={() => onPause(folder)}
+                          disabled={busyKey === `pause-${folder.id}`}
+                          aria-label={
+                            folder.paused
+                              ? `Resume ${folder.name}`
+                              : `Pause ${folder.name}`
+                          }
+                          title={folder.paused ? "Resume sync" : "Pause sync"}
+                        >
+                          {folder.paused ? (
+                            <Radio size={16} />
+                          ) : (
+                            <WifiOff size={16} />
+                          )}
+                        </button>
+                        <button
+                          className="icon-action danger-action"
+                          onClick={() => onRemove(folder)}
+                          disabled={busyKey === `remove-folder-${folder.id}`}
+                          aria-label={`Remove ${folder.name}`}
+                          title="Stop tracking"
+                        >
+                          {busyKey === `remove-folder-${folder.id}` ? (
+                            <LoaderCircle size={16} className="spin" />
+                          ) : (
+                            <Trash2 size={16} />
+                          )}
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <EmptyBlock
+            icon={<Folder size={20} />}
+            title="No folders syncing"
+            action={
+              <button className="button button-primary" onClick={onAdd}>
+                <Plus size={15} /> Add folder
+              </button>
+            }
+          />
+        )}
+      </section>
+      <section className="panel data-panel">
+        <PanelHeader title="Received folders" icon={<Folder size={17} />} />
+        {state.receivedFolders?.length ? (
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Folder and local path</th>
+                  <th>From device</th>
+                  <th>Files</th>
+                  <th>Last received</th>
+                </tr>
+              </thead>
+              <tbody>
+                {state.receivedFolders.map((folder) => (
+                  <tr key={folder.id}>
+                    <td>
+                      <div className="table-primary">
+                        <span className="row-icon folder-row-icon">
+                          <Folder size={16} />
+                        </span>
+                        <span>
+                          <strong>{folder.name}</strong>
+                          <small className="mono-cell" title={folder.path}>
+                            {folder.path}
+                          </small>
+                          <button
+                            className="text-button"
+                            onClick={() => onCopyPath(folder.path)}
+                          >
+                            {copiedPath === folder.path
+                              ? "Copied path"
+                              : "Copy path"}
+                          </button>
+                        </span>
+                      </div>
+                    </td>
+                    <td>{folder.peerName || folder.peerId}</td>
+                    <td>
+                      <details>
+                        <summary>
+                          {folder.files.length}{" "}
+                          {folder.files.length === 1 ? "file" : "files"} ·{" "}
+                          {formatBytes(folder.bytes)}
+                        </summary>
+                        <ul>
+                          {folder.files.map((file) => (
+                            <li key={file.path}>
+                              <a
+                                className="text-button"
+                                href={`/api/received/${encodeURIComponent(folder.id)}/files/${file.path.split("/").map(encodeURIComponent).join("/")}`}
+                                download
+                              >
+                                {file.path}
+                              </a>
+                              <span className="muted-cell">
+                                {" "}
+                                · {formatBytes(file.size)}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      </details>
+                    </td>
+                    <td>{formatRelativeTime(folder.lastReceived)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <EmptyBlock
+            icon={<Folder size={20} />}
+            title="No files received yet"
+            detail="On the other computer, add a source folder and select this device. Received files and their local path will appear here automatically."
+          />
+        )}
+      </section>
+    </div>
   )
 }
 

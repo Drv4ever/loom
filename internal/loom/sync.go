@@ -74,6 +74,9 @@ func (a *App) addFolder(path, peerID, name string) (Folder, error) {
 	if name == "" {
 		name = filepath.Base(resolved)
 	}
+	if len(name) > 120 {
+		return Folder{}, fmt.Errorf("folder name must be under 120 characters")
+	}
 	id, err := randomSuffix()
 	if err != nil {
 		return Folder{}, err
@@ -230,7 +233,7 @@ func (a *App) syncFolder(requestCtx context.Context, id string) error {
 			a.finishSync(id, err, transferred, newManifest)
 			return fmt.Errorf("open source file %s: %w", name, err)
 		}
-		n, transferErr := a.main.TransferFile(network.WithAllowLimitedConn(syncCtx, "loom folder sync"), peerID, id, desc, input)
+		n, transferErr := a.main.TransferFile(network.WithAllowLimitedConn(syncCtx, "loom folder sync"), peerID, id, desc, input, folder.Name)
 		closeErr := input.Close()
 		transferred += n
 		if transferErr != nil {

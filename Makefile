@@ -1,8 +1,9 @@
-.PHONY: help demo test test-peers check build
+.PHONY: help demo run test test-peers check build
 
 help:
 	@printf '%s\n' \
 	  'make demo  Start the local demo dashboard and Go mesh' \
+	  'make run   Start this computer as a real Loom device (dashboard + mesh)' \
 	  'make test  Run the black-box demo API smoke test' \
 	  'make test-peers Run the normal-mode two-peer integration test' \
 	  'make check Run Go, frontend, demo, and normal-mode checks' \
@@ -10,6 +11,9 @@ help:
 
 demo:
 	@./scripts/demo.sh
+
+run:
+	@./scripts/run.sh
 
 test:
 	@python3 scripts/smoke.py

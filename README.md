@@ -18,6 +18,8 @@ Open [http://127.0.0.1:3000](http://127.0.0.1:3000). The Go API listens on `127.
 
 ## Run on real devices
 
+For a live demo with two physical computers on the same Wi-Fi, follow [the two-computer walkthrough](docs/TWO-COMPUTER-DEMO.md). `./scripts/run.sh --name "Laptop A" --network-key-file "$HOME/.loom-demo-network.key"` starts a real backend and dashboard together, with a fixed peer port of 4001. `make run` also starts a real device, generating its own network key if none has been stored yet; the other computer must use that same key.
+
 Install the same Loom version and use one private network key on each device. Generate the key once and keep it in a private file:
 
 ```sh
@@ -35,12 +37,13 @@ go run ./cmd/loom \
   --name "Primary laptop" \
   --listen 127.0.0.1:8787 \
   --data-dir "$HOME/.loom" \
-  --network-key "$LOOM_NETWORK_KEY"
+  --network-key-file "$HOME/.loom-network-key" \
+  --peer-listen /ip4/0.0.0.0/tcp/4001
 ```
 
 On the other device, use a different `--name` and `--data-dir`, but the same key. Devices on the same LAN discover each other through mDNS. Start the dashboard for each local backend with `cd web && bun run dev --host 127.0.0.1`; the dashboard uses port 3000 and the backend uses port 8787. If a peer is on a reachable network without mDNS, add its libp2p multiaddress from the Devices view. A node can be started with `--relay` to provide a circuit relay; Loom does not include a hosted relay service.
 
-Services are published from a device to its loopback HTTP target, such as `http://127.0.0.1:3001`. Loom proxies requests to that approved service over the peer connection. Folder sync copies from the selected local source path to the receiving peer's Loom-managed folder under its data directory. It is one-way; deleting the Loom folder entry stops tracking and does not delete received files. The browser cannot browse another machine's disk, so enter the source path on the device that owns it.
+Services are published from a device to its loopback HTTP target, such as `http://127.0.0.1:3001`. Loom proxies requests to that approved service over the peer connection. Folder sync automatically copies new and changed files from the selected local source path to the receiving peer's Loom-managed folder under its data directory. The receiver's **Received folders** table shows local paths, file lists, and download links, including after a restart. Each source folder sends one way; share a separate source folder from the other computer to send files back. Source deletions are not propagated, and deleting the Loom folder entry stops tracking without deleting received files. The browser cannot browse another machine's disk, so enter the source path on the device that owns it.
 
 ## Build and checks
 

@@ -31,6 +31,7 @@ type Config struct {
 	Listen     string
 	DataDir    string
 	NetworkKey string
+	PeerListen string
 	Demo       bool
 	Relay      bool
 }
@@ -133,7 +134,7 @@ func New(ctx context.Context, config Config) (*App, error) {
 		node, err := NewNode(NodeOptions{
 			Name: deviceName(config.Name), Platform: runtime.GOOS, DataDir: mainDir,
 			IdentityPath: filepath.Join(dataDir, "identity.key"),
-			ReceiveDir:   filepath.Join(dataDir, "received"), NetworkKey: key, ListenAddress: "/ip4/0.0.0.0/tcp/0", RelayService: config.Relay,
+			ReceiveDir:   filepath.Join(dataDir, "received"), NetworkKey: key, ListenAddress: config.PeerListen, RelayService: config.Relay,
 		})
 		if err != nil {
 			return nil, err
@@ -559,6 +560,17 @@ func (a *App) State() State {
 			stats.SyncedFiles += folder.Files
 		}
 	}
+	received := []ReceivedFolder{}
+	if a.main != nil {
+		received = a.main.ReceivedFolders()
+	}
+	for i := range received {
+		for _, device := range devices {
+			if device.ID == received[i].PeerID {
+				received[i].PeerName = device.Name
+			}
+		}
+	}
 	return State{
 		Network: NetworkState{ID: a.networkID, Name: name, Connected: connected, Demo: demo, PeerID: func() string {
 			if a.main != nil {
@@ -571,7 +583,7 @@ func (a *App) State() State {
 			}
 			return nil
 		}(), Version: Version},
-		Devices: devices, Services: services, Folders: folders, Activity: activity, Stats: stats,
+		Devices: devices, Services: services, Folders: folders, ReceivedFolders: received, Activity: activity, Stats: stats,
 	}
 }
 

@@ -238,10 +238,66 @@ func TestFreshNormalStateUsesEmptyArrays(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode state: %v", err)
 	}
-	for _, field := range []string{"devices", "services", "folders", "activity"} {
+	for _, field := range []string{"devices", "services", "folders", "receivedFolders", "activity"} {
 		if value := string(body[field]); !strings.HasPrefix(value, "[") {
 			t.Errorf("state.%s = %s, want a JSON array", field, value)
 		}
+	}
+}
+
+func TestReceivedFileDownloadAndSenderIsolation(t *testing.T) {
+	key := testNetworkKey(8)
+	sender := newTestNode(t, "sender", t.TempDir(), key)
+	receiver := newTestNode(t, "receiver", t.TempDir(), key)
+	other := newTestNode(t, "other", t.TempDir(), key)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for _, node := range []*Node{sender, other} {
+		if err := node.Host.Connect(ctx, peer.AddrInfo{ID: receiver.Host.ID(), Addrs: receiver.Host.Addrs()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	contents := []byte("verified receipt\n")
+	digest := sha256.Sum256(contents)
+	desc := fileDescriptor{Path: "nested/file #1.txt", Size: int64(len(contents)), SHA256: hex.EncodeToString(digest[:])}
+	if _, err := sender.TransferFile(ctx, receiver.Host.ID(), "receipt-test", desc, bytes.NewReader(contents), "Incoming demo"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := other.TransferFile(ctx, receiver.Host.ID(), "receipt-test", desc, bytes.NewReader(contents)); err == nil {
+		t.Fatal("another sender overwrote an owned folder")
+	}
+	app := &App{main: receiver}
+	handler := app.Handler("127.0.0.1:8787")
+	url := "/api/received/receipt-test/files/nested/file%20%231.txt"
+	response := serveTestRequest(handler, http.MethodGet, url, "", "")
+	if response.Code != http.StatusOK || !bytes.Equal(response.Body.Bytes(), contents) {
+		t.Fatalf("download status=%d bytes=%q", response.Code, response.Body.Bytes())
+	}
+	if !strings.HasPrefix(response.Header().Get("Content-Disposition"), "attachment;") || response.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatal("download must be served as an attachment with nosniff")
+	}
+	response = serveTestRequest(handler, http.MethodGet, "/api/received/receipt-test/files/%2e%2e/identity.key", "", "")
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("traversal status=%d, want 400", response.Code)
+	}
+	response = serveTestRequest(handler, http.MethodGet, "/api/received/receipt-test/files/unknown.txt", "", "")
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("unregistered file status=%d, want 404", response.Code)
+	}
+	destination := filepath.Join(receiver.ReceiveDir, "receipt-test", "nested", "file #1.txt")
+	if err := os.Remove(destination); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(secret, []byte("outside managed root"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, destination); err != nil {
+		t.Fatal(err)
+	}
+	response = serveTestRequest(handler, http.MethodGet, url, "", "")
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("escaping symlink status=%d, want 404", response.Code)
 	}
 }
 
