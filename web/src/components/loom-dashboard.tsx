@@ -19,7 +19,6 @@ import {
   RefreshCw,
   Server,
   Settings2,
-  ShieldCheck,
   Trash2,
   Wifi,
   WifiOff,
@@ -229,29 +228,9 @@ export function LoomDashboard() {
             <Link2 size={19} strokeWidth={2.2} />
           </span>
           <span className="brand-name">loom</span>
-          <span className="brand-version">0.1</span>
         </a>
 
-        <div className="workspace-switcher">
-          <span className="workspace-glyph">
-            <Network size={15} />
-          </span>
-          <span className="workspace-copy">
-            <strong>{state.network.name || "Private workspace"}</strong>
-            <small>
-              {state.network.connected
-                ? "Network connected"
-                : "Networking paused"}
-            </small>
-          </span>
-          <span
-            className={`sidebar-status ${state.network.connected ? "is-online" : "is-offline"}`}
-            aria-label={state.network.connected ? "Connected" : "Disconnected"}
-          />
-        </div>
-
         <nav className="primary-nav" aria-label="Main navigation">
-          <span className="nav-caption">Workspace</span>
           {navigation.map(({ id, label, icon: Icon }) => (
             <button
               key={id}
@@ -261,83 +240,22 @@ export function LoomDashboard() {
             >
               <Icon size={17} strokeWidth={1.8} />
               <span>{label}</span>
-              {id === "activity" && state.activity.length > 0 && (
-                <span className="nav-count">
-                  {Math.min(state.activity.length, 99)}
-                </span>
-              )}
             </button>
           ))}
         </nav>
-
-        <div className="sidebar-bottom">
-          <div className="sidebar-peer">
-            <div className="peer-avatar">
-              <Laptop size={16} />
-            </div>
-            <div className="peer-copy">
-              <span>Your device</span>
-              <strong>
-                {state.devices.find((device) => device.self)?.name ||
-                  "This device"}
-              </strong>
-            </div>
-            <span className="online-indicator" title="Online" />
-          </div>
-          {state.network.demo && (
-            <div className="demo-mark">
-              <span /> Local demo
-            </div>
-          )}
-          <div className="sidebar-footer">
-            <ShieldCheck size={14} />
-            <span>Private by design</span>
-          </div>
-        </div>
       </aside>
 
       <main className="main-shell">
-        <header className="topbar">
-          <div className="breadcrumbs">
-            <span>Workspace</span>
-            <span className="crumb-slash">/</span>
-            <strong>{pageTitles[page]}</strong>
-          </div>
-          <div className="topbar-actions">
-            <span
-              className={`connection-pill ${state.network.connected ? "connected" : "disconnected"}`}
-            >
-              {state.network.connected ? (
-                <Wifi size={14} />
-              ) : (
-                <WifiOff size={14} />
-              )}
-              {state.network.connected ? "Connected" : "Paused"}
-            </span>
-            {state.network.demo && (
-              <span className="topbar-demo-mark">
-                <i />
-                Local demo
-              </span>
-            )}
-            <button
-              className="avatar-button"
-              title="Settings"
-              onClick={() => navigateTo("settings")}
-            >
-              {initials(
-                state.devices.find((device) => device.self)?.name || "You"
-              )}
-            </button>
-          </div>
-        </header>
-
         <div className="content-area">
           <div className="page-heading">
             <div>
               <h1>{pageTitles[page]}</h1>
-              <p>{subtitleFor(page, state)}</p>
             </div>
+            {state.network.demo && (
+              <span className="page-demo-mark">
+                <i /> Local demo
+              </span>
+            )}
             <div className="heading-actions">
               {page === "devices" || page === "overview" ? (
                 <Button
@@ -367,6 +285,15 @@ export function LoomDashboard() {
             </div>
           </div>
 
+          {!state.network.connected && page !== "settings" && !apiError && (
+            <div className="connection-warning" role="status">
+              <WifiOff size={16} />
+              <span>Networking paused</span>
+              <button onClick={() => navigateTo("settings")}>
+                Open Settings
+              </button>
+            </div>
+          )}
           {apiError && (
             <div className="connection-warning" role="status">
               <WifiOff size={16} />
@@ -531,7 +458,6 @@ export function LoomDashboard() {
       <Dialog
         open={dialog === "device"}
         title="Add a device"
-        description="Connect another device to your private Loom network."
         onClose={() => setDialog(null)}
         busy={busyKey === "dialog"}
         error={actionError}
@@ -576,7 +502,6 @@ export function LoomDashboard() {
       <Dialog
         open={dialog === "service"}
         title="Publish a service"
-        description="Share a local HTTP service with devices in this network."
         onClose={() => setDialog(null)}
         busy={busyKey === "dialog"}
         error={actionError}
@@ -636,7 +561,6 @@ export function LoomDashboard() {
       <Dialog
         open={dialog === "folder"}
         title="Add a folder"
-        description="Register a folder to sync with another device."
         onClose={() => setDialog(null)}
         busy={busyKey === "dialog"}
         error={actionError}
@@ -731,7 +655,6 @@ export function LoomDashboard() {
       <Dialog
         open={dialog === "diagnostics"}
         title="Network diagnostics"
-        description="Read-only details for troubleshooting. Private keys and file contents are never shown."
         onClose={() => setDialog(null)}
         busy={diagnosticsLoading}
         error={actionError}
@@ -749,7 +672,6 @@ export function LoomDashboard() {
           <EmptyBlock
             icon={<CircleHelp size={19} />}
             title="Diagnostics unavailable"
-            detail="The API could not return diagnostic information."
           />
         )}
         <div className="dialog-actions">
@@ -800,7 +722,7 @@ function Overview({
         />
         <Stat
           icon={<Globe2 size={17} />}
-          label="Published services"
+          label="Services"
           value={state.stats.services}
         />
         <Stat
@@ -819,7 +741,6 @@ function Overview({
         <section className="panel topology-panel">
           <PanelHeader
             title="Network topology"
-            detail="Live connections"
             icon={<Network size={17} />}
             action={
               <span
@@ -834,7 +755,6 @@ function Overview({
             <EmptyBlock
               icon={<Network size={20} />}
               title="No devices yet"
-              detail="Connect a device to see the network take shape."
               action={
                 <button
                   className="text-button"
@@ -875,7 +795,6 @@ function Overview({
             <EmptyBlock
               icon={<Laptop size={18} />}
               title="No devices connected"
-              detail="Add a device with its multiaddress."
             />
           ) : (
             <div className="device-mini-list">
@@ -895,11 +814,7 @@ function Overview({
               </span>
               <span>
                 <strong>Change sample file</strong>
-                <small>
-                  {busyKey === "demo"
-                    ? "Writing and syncing…"
-                    : "Run a real demo sync"}
-                </small>
+                {busyKey === "demo" && <small>Writing and syncing…</small>}
               </span>
               <ArrowUpRight size={14} />
             </button>
@@ -911,7 +826,11 @@ function Overview({
         <section className="panel list-panel">
           <PanelHeader
             title="Services"
-            detail={`${state.services.length} published`}
+            detail={
+              state.services.length
+                ? `${state.services.length} published`
+                : undefined
+            }
             icon={<Globe2 size={17} />}
             action={
               <button className="quiet-link" onClick={() => onPage("services")}>
@@ -925,7 +844,6 @@ function Overview({
             <EmptyBlock
               icon={<Globe2 size={18} />}
               title="No services published"
-              detail="Share an HTTP service from this device."
               action={
                 <button className="text-button" onClick={onService}>
                   <Plus size={14} /> Publish a service
@@ -937,7 +855,11 @@ function Overview({
         <section className="panel list-panel">
           <PanelHeader
             title="Folders"
-            detail={`${state.folders.length} tracked`}
+            detail={
+              state.folders.length
+                ? `${state.folders.length} tracked`
+                : undefined
+            }
             icon={<Folder size={17} />}
             action={
               <button className="quiet-link" onClick={() => onPage("folders")}>
@@ -956,7 +878,6 @@ function Overview({
             <EmptyBlock
               icon={<Folder size={18} />}
               title="No folders syncing"
-              detail="Choose a folder and an online device."
               action={
                 <button className="text-button" onClick={onFolder}>
                   <Plus size={14} /> Add a folder
@@ -971,7 +892,6 @@ function Overview({
         <section className="panel activity-preview">
           <PanelHeader
             title="Recent activity"
-            detail="Latest network events"
             icon={<ActivityIcon size={17} />}
             action={
               <button className="quiet-link" onClick={() => onPage("activity")}>
@@ -1019,8 +939,7 @@ function DevicesPage({
         ) : (
           <EmptyBlock
             icon={<Network size={20} />}
-            title="Your network is waiting"
-            detail="Add another device to create your first connection."
+            title="No other devices yet"
             action={
               <button className="button button-primary" onClick={onAdd}>
                 <Plus size={15} /> Add device
@@ -1043,7 +962,9 @@ function DevicesPage({
       <section className="panel data-panel">
         <PanelHeader
           title="All devices"
-          detail={`${state.devices.length} in this workspace`}
+          detail={
+            state.devices.length ? `${state.devices.length} devices` : undefined
+          }
           icon={<Laptop size={17} />}
           action={
             state.network.addresses.length > 0 ? (
@@ -1077,7 +998,6 @@ function DevicesPage({
           <EmptyBlock
             icon={<Laptop size={19} />}
             title="No devices in this network"
-            detail="Connect a device using its full multiaddress."
             action={
               <button className="text-button" onClick={onAdd}>
                 <Plus size={14} /> Add a device
@@ -1103,11 +1023,7 @@ function ServicesPage({
 }) {
   return (
     <section className="panel data-panel">
-      <PanelHeader
-        title="Published services"
-        detail="HTTP services shared across your network"
-        icon={<Globe2 size={17} />}
-      />
+      <PanelHeader title="Published services" icon={<Globe2 size={17} />} />
       {state.services.length ? (
         <div className="table-scroll">
           <table>
@@ -1122,7 +1038,9 @@ function ServicesPage({
             </thead>
             <tbody>
               {state.services.map((service) => {
-                const locallyOwned = service.deviceId === state.network.peerId
+                const locallyOwned =
+                  Boolean(state.network.peerId) &&
+                  service.deviceId === state.network.peerId
                 return (
                   <tr key={service.id}>
                     <td>
@@ -1139,7 +1057,10 @@ function ServicesPage({
                         </span>
                       </div>
                     </td>
-                    <td>{service.deviceName || "This device"}</td>
+                    <td>
+                      {service.deviceName ||
+                        (locallyOwned ? "This device" : "Unknown device")}
+                    </td>
                     <td>
                       <StatusLabel status={service.status} />
                     </td>
@@ -1187,7 +1108,6 @@ function ServicesPage({
         <EmptyBlock
           icon={<Globe2 size={20} />}
           title="No services published"
-          detail="Publish a local HTTP service to make it reachable from devices in this network."
           action={
             <button className="button button-primary" onClick={onAdd}>
               <Plus size={15} /> Publish service
@@ -1216,11 +1136,7 @@ function FoldersPage({
 }) {
   return (
     <section className="panel data-panel">
-      <PanelHeader
-        title="Synced folders"
-        detail="Files move over encrypted device connections"
-        icon={<FolderSync size={17} />}
-      />
+      <PanelHeader title="Synced folders" icon={<FolderSync size={17} />} />
       {state.folders.length ? (
         <div className="table-scroll">
           <table>
@@ -1248,7 +1164,7 @@ function FoldersPage({
                       </span>
                     </div>
                   </td>
-                  <td>{folder.peerName}</td>
+                  <td>{folder.peerName || "Unknown device"}</td>
                   <td>
                     <StatusLabel status={folderStatus(folder)} />
                     {folder.error && (
@@ -1320,7 +1236,6 @@ function FoldersPage({
         <EmptyBlock
           icon={<Folder size={20} />}
           title="No folders syncing"
-          detail="Add a folder by entering its absolute path and choosing an online device."
           action={
             <button className="button button-primary" onClick={onAdd}>
               <Plus size={15} /> Add folder
@@ -1335,19 +1250,11 @@ function FoldersPage({
 function ActivityPage({ activities }: { activities: Activity[] }) {
   return (
     <section className="panel data-panel activity-panel">
-      <PanelHeader
-        title="Network activity"
-        detail="Events received from the Loom API"
-        icon={<ActivityIcon size={17} />}
-      />
+      <PanelHeader title="Network activity" icon={<ActivityIcon size={17} />} />
       {activities.length ? (
         <ActivityList activities={activities} />
       ) : (
-        <EmptyBlock
-          icon={<FileClock size={20} />}
-          title="No activity yet"
-          detail="Device connections, service changes, and syncs will appear here."
-        />
+        <EmptyBlock icon={<FileClock size={20} />} title="No activity yet" />
       )}
     </section>
   )
@@ -1372,11 +1279,7 @@ function SettingsPage({
   return (
     <div className="settings-grid">
       <section className="panel settings-panel">
-        <PanelHeader
-          title="Network"
-          detail="Control this device’s participation"
-          icon={<Network size={17} />}
-        />
+        <PanelHeader title="Network" icon={<Network size={17} />} />
         <div className="setting-row">
           <span className="setting-icon">
             <Wifi size={17} />
@@ -1402,36 +1305,32 @@ function SettingsPage({
         </div>
         <div className="setting-row">
           <span className="setting-icon">
-            <ShieldCheck size={17} />
+            <Network size={17} />
           </span>
           <span className="setting-copy">
             <strong>Network identity</strong>
             <small className="mono-cell">
-              {state.network.id || state.network.peerId}
+              {state.network.id || state.network.peerId || "Unavailable"}
             </small>
           </span>
-          <span className="setting-value">Private</span>
         </div>
-        <div className="setting-row">
-          <span className="setting-icon">
-            <Laptop size={17} />
-          </span>
-          <span className="setting-copy">
-            <strong>This device</strong>
-            <small>
-              {self?.name || "Local device"} ·{" "}
-              {self?.platform || "unknown platform"}
-            </small>
-          </span>
-          <span className="setting-value">v{state.network.version}</span>
-        </div>
+        {self && (
+          <div className="setting-row">
+            <span className="setting-icon">
+              <Laptop size={17} />
+            </span>
+            <span className="setting-copy">
+              <strong>This device</strong>
+              <small>
+                {self.name} · {self.platform || "Unknown platform"}
+              </small>
+            </span>
+            <span className="setting-value">v{state.network.version}</span>
+          </div>
+        )}
       </section>
       <section className="panel settings-panel">
-        <PanelHeader
-          title="Connection details"
-          detail="Share this address to invite a device"
-          icon={<Link2 size={17} />}
-        />
+        <PanelHeader title="Connection details" icon={<Link2 size={17} />} />
         {state.network.addresses.length ? (
           <div className="address-list">
             {state.network.addresses.map((address) => (
@@ -1456,20 +1355,12 @@ function SettingsPage({
           <EmptyBlock
             icon={<Link2 size={18} />}
             title="No addresses available"
-            detail="The API has not reported a connection address yet."
+            detail="No connection address has been reported."
           />
         )}
       </section>
       <section className="panel settings-panel diagnostics-card">
-        <PanelHeader
-          title="Diagnostics"
-          detail="Safe, read-only network details"
-          icon={<Settings2 size={17} />}
-        />
-        <p>
-          Inspect version, peer, and transport information to help troubleshoot
-          this device.
-        </p>
+        <PanelHeader title="Diagnostics" icon={<Settings2 size={17} />} />
         <button className="button button-secondary" onClick={onDiagnostics}>
           <Clipboard size={15} /> View diagnostics
         </button>
@@ -1485,18 +1376,27 @@ function Topology({
   state: AppState
   large?: boolean
 }) {
-  const self = state.devices.find((device) => device.self) || state.devices[0]
-  const peers = state.devices.filter((device) => device.id !== self.id)
+  const self = state.devices.find((device) => device.self)
+  if (!self) {
+    return (
+      <EmptyBlock
+        icon={<Network size={20} />}
+        title="This device is not reported"
+        detail="The API has not reported a local device."
+      />
+    )
+  }
+  const peers = state.devices.filter((device) => !device.self)
   const online = peers.filter((device) => device.online)
   const offline = peers.filter((device) => !device.online)
   const width = large ? 900 : 700
-  const height = large ? 330 : 280
+  const baseHeight = large ? 330 : 280
+  const peerSlots = Math.min(Math.max(online.length, 1), 5)
+  const spread = peerSlots > 2 ? 90 * (peerSlots - 1) : 140
+  const height = peerSlots > 2 ? 160 + spread : baseHeight
   const nodeX = large ? 155 : 142
   const nodeY = height / 2
-  const radius = large ? 105 : 83
-  const peerSlots = Math.min(Math.max(online.length, 1), 5)
   const positioned = online.slice(0, 5).map((device, index) => {
-    const spread = Math.min(205, height * 0.68)
     const y =
       peerSlots === 1
         ? nodeY
@@ -1508,51 +1408,39 @@ function Topology({
   })
 
   return (
-    <div className={`topology-canvas ${large ? "topology-canvas-large" : ""}`}>
+    <div
+      className={`topology-canvas ${large ? "topology-canvas-large" : ""}`}
+      style={height > baseHeight ? { height: `${height}px` } : undefined}
+    >
       <div
         className="topology-surface"
         role="img"
-        aria-label={`Network topology. ${self.name} is this device. ${online.length} connected devices and ${offline.length} offline devices.`}
+        aria-label={`Network topology. ${self.name} is this device. ${online.length} online devices and ${offline.length} offline devices.`}
       >
-        <div className="topology-grid-bg" />
         <svg
           className="topology-lines"
           viewBox={`0 0 ${width} ${height}`}
           preserveAspectRatio="none"
           aria-hidden="true"
         >
-          <circle
-            className="orbit-ring orbit-one"
-            cx={nodeX}
-            cy={nodeY}
-            r={radius + 16}
-          />
-          <circle
-            className="orbit-ring orbit-two"
-            cx={nodeX}
-            cy={nodeY}
-            r={radius + 33}
-          />
-          {positioned.map(({ device, x, y }) => {
-            const isRelay = isRelayed(device.connection)
-            return (
-              <g
-                key={device.id}
-                className={
-                  isRelay ? "link-group relay-link" : "link-group direct-link"
-                }
-              >
-                <path
-                  className="topology-link-glow"
-                  d={`M ${nodeX + 34} ${nodeY} C ${nodeX + 100} ${nodeY}, ${x - 110} ${y}, ${x - 21} ${y}`}
-                />
-                <path
-                  className="topology-link"
-                  d={`M ${nodeX + 34} ${nodeY} C ${nodeX + 100} ${nodeY}, ${x - 110} ${y}, ${x - 21} ${y}`}
-                />
-              </g>
-            )
-          })}
+          {positioned
+            .filter(({ device }) => hasKnownConnection(device.connection))
+            .map(({ device, x, y }) => {
+              const isRelay = isRelayed(device.connection)
+              return (
+                <g
+                  key={device.id}
+                  className={
+                    isRelay ? "link-group relay-link" : "link-group direct-link"
+                  }
+                >
+                  <path
+                    className="topology-link"
+                    d={`M ${nodeX} ${nodeY} C ${nodeX + 110} ${nodeY}, ${x - 110} ${y}, ${x} ${y}`}
+                  />
+                </g>
+              )
+            })}
         </svg>
         <div
           className="topology-local"
@@ -1575,10 +1463,10 @@ function Topology({
           </div>
         </div>
         {positioned.map(({ device, x, y }) => {
-          const isRelay = isRelayed(device.connection)
+          const connectionType = connectionKind(device.connection)
           return (
             <div
-              className={`topology-peer ${isRelay ? "is-relayed" : "is-direct"}`}
+              className={`topology-peer is-${connectionType}`}
               key={device.id}
               style={{
                 left: `${(x / width) * 100}%`,
@@ -1592,8 +1480,16 @@ function Topology({
               <div className="topology-node-label">
                 <strong>{device.name}</strong>
                 <span>
-                  <i />
-                  {isRelay ? "Circuit relay" : "Direct link"}
+                  {connectionType !== "unknown" && (
+                    <i
+                      className={
+                        connectionType === "relayed"
+                          ? "relay-mark"
+                          : "direct-mark"
+                      }
+                    />
+                  )}
+                  {connectionLabel(device.connection)}
                   {device.latencyMs > 0 ? ` · ${device.latencyMs} ms` : ""}
                 </span>
               </div>
@@ -1602,8 +1498,7 @@ function Topology({
         })}
         {online.length === 0 && (
           <div className="topology-idle">
-            <span>Waiting for another device</span>
-            <small>Share a multiaddress to connect</small>
+            <span>No connected devices</span>
           </div>
         )}
         {offline.length > 0 && (
@@ -1713,7 +1608,7 @@ function ServiceList({
           <span className="quiet-row-main">
             <strong>{service.name}</strong>
             <small>
-              {service.deviceName || "This device"} ·{" "}
+              {service.deviceName || "Unknown device"} ·{" "}
               {service.protocol.toUpperCase()}
               {!compact && ` · port ${service.port}`}
             </small>
@@ -1839,13 +1734,15 @@ function ConnectionLabel({ device }: { device: Device }) {
     )
   if (!device.online)
     return <span className="connection-type muted-cell">—</span>
-  const relay = isRelayed(device.connection)
+  const connection = connectionKind(device.connection)
   return (
     <span className="connection-type">
-      <i
-        className={`connection-mark ${relay ? "relay-mark" : "direct-mark"}`}
-      />
-      {relay ? "Circuit relay" : "Direct"}
+      {connection !== "unknown" && (
+        <i
+          className={`connection-mark ${connection === "relayed" ? "relay-mark" : "direct-mark"}`}
+        />
+      )}
+      {connectionLabel(device.connection)}
       {device.latencyMs > 0 && <small>{device.latencyMs} ms</small>}
     </span>
   )
@@ -1857,11 +1754,31 @@ function isRelayed(connection: string) {
   )
 }
 
+function isDirect(connection: string) {
+  return connection.toLowerCase() === "direct"
+}
+
+function hasKnownConnection(connection: string) {
+  return isRelayed(connection) || isDirect(connection)
+}
+
+function connectionKind(connection: string) {
+  if (isRelayed(connection)) return "relayed"
+  if (isDirect(connection)) return "direct"
+  return "unknown"
+}
+
+function connectionLabel(connection: string) {
+  if (isRelayed(connection)) return "Circuit relay"
+  if (isDirect(connection)) return "Direct link"
+  return connection ? humanizeStatus(connection) : "Connection unknown"
+}
+
 function formatConnection(connection: string) {
   if (isRelayed(connection)) return "Circuit relay"
   if (connection === "local") return "Local"
-  if (!connection) return "Connected"
-  return connection.charAt(0).toUpperCase() + connection.slice(1)
+  if (!connection) return "Connection unknown"
+  return humanizeStatus(connection)
 }
 
 function Stat({
@@ -1922,14 +1839,14 @@ function EmptyBlock({
 }: {
   icon: ReactNode
   title: string
-  detail: string
+  detail?: string
   action?: ReactNode
 }) {
   return (
     <div className="empty-block">
       <span className="empty-icon">{icon}</span>
       <strong>{title}</strong>
-      <p>{detail}</p>
+      {detail && <p>{detail}</p>}
       {action}
     </div>
   )
@@ -2014,7 +1931,6 @@ function FormActions({
 function Dialog({
   open,
   title,
-  description,
   onClose,
   children,
   busy = false,
@@ -2023,7 +1939,6 @@ function Dialog({
 }: {
   open: boolean
   title: string
-  description: string
   onClose: () => void
   children: ReactNode
   busy?: boolean
@@ -2032,7 +1947,6 @@ function Dialog({
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null)
   const titleId = useId()
-  const descriptionId = useId()
   useEffect(() => {
     const element = dialogRef.current
     if (!element) return
@@ -2047,7 +1961,6 @@ function Dialog({
       className="app-dialog"
       ref={dialogRef}
       aria-labelledby={titleId}
-      aria-describedby={descriptionId}
       onCancel={(event) => {
         if (busy) event.preventDefault()
       }}
@@ -2060,7 +1973,6 @@ function Dialog({
       <div className="dialog-top">
         <div>
           <h2 id={titleId}>{title}</h2>
-          <p id={descriptionId}>{description}</p>
         </div>
         <button
           className="dialog-close"
@@ -2103,7 +2015,6 @@ function LoadingView() {
           <Link2 size={20} />
         </span>
         <strong>Connecting to Loom</strong>
-        <p>Loading your private network…</p>
         <span className="loading-track">
           <i />
         </span>
@@ -2130,8 +2041,7 @@ function ApiUnavailable({
         <div className="local-api-note">
           <strong>Start the Loom backend</strong>
           <code>
-            go run ./cmd/loom --demo --listen 127.0.0.1:8787 --data-dir
-            .loom-demo
+            go run ./cmd/loom --listen 127.0.0.1:8787 --data-dir .loom
           </code>
         </div>
         <button className="button button-primary" onClick={onRetry}>
@@ -2139,36 +2049,6 @@ function ApiUnavailable({
         </button>
       </div>
     </div>
-  )
-}
-
-function subtitleFor(page: PageKey, state: AppState) {
-  const self =
-    state.devices.find((device) => device.self)?.name || "This device"
-  switch (page) {
-    case "overview":
-      return `${state.network.name || "Your private network"} · ${self}`
-    case "devices":
-      return "Devices connected to your private network"
-    case "services":
-      return "HTTP services shared across your devices"
-    case "folders":
-      return "Folders syncing between trusted devices"
-    case "activity":
-      return "A record of changes across your network"
-    case "settings":
-      return "Network identity, connectivity, and diagnostics"
-  }
-}
-
-function initials(value: string) {
-  return (
-    value
-      .split(/\s+/)
-      .filter(Boolean)
-      .slice(0, 2)
-      .map((part) => part.charAt(0).toUpperCase())
-      .join("") || "LO"
   )
 }
 

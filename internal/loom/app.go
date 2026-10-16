@@ -725,12 +725,12 @@ func (a *App) startDemoWebService(node *Node, id, name, deviceName string) error
 	page := template.Must(template.New("demo-service").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{.Name}} · Loom</title><style>
-:root{color-scheme:dark;font:16px/1.55 ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#101a2c;color:#eef4ff}
-*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;background:radial-gradient(ellipse at 82% 12%,#284a7b 0,transparent 38%),linear-gradient(145deg,#101a2c,#182943 62%,#111c30)}
-main{width:min(680px,100%);padding:38px;border:1px solid #3a5173;border-radius:18px;background:#17263bdc;box-shadow:0 24px 80px #07101f88}
-.eyebrow{margin:0 0 18px;color:#87c9ff;font-size:12px;font-weight:700;letter-spacing:.16em;text-transform:uppercase}.mark{display:inline-grid;width:36px;height:36px;place-items:center;margin-right:9px;border-radius:11px;background:#386be8;color:white;font-weight:800}
-h1{margin:0 0 10px;font-size:clamp(27px,5vw,40px);letter-spacing:-.04em}.sub{margin:0;color:#b9c7db}.card{margin-top:28px;padding:18px 20px;border:1px solid #324761;border-radius:12px;background:#111d30}.label{color:#91a4bf;font-size:12px;text-transform:uppercase;letter-spacing:.1em}.value{margin-top:5px;overflow-wrap:anywhere;color:#edf5ff;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px}.footer{display:flex;align-items:center;gap:9px;margin-top:26px;color:#a7b8cf;font-size:13px}.dot{width:8px;height:8px;border-radius:50%;background:#55d4b2;box-shadow:0 0 14px #55d4b277}
-</style></head><body><main><p class="eyebrow"><span class="mark">L</span>Private app mesh</p><h1>{{.Name}}</h1><p class="sub">A live preview served by <strong>{{.Peer}}</strong>.</p><section class="card"><div class="label">Requested path</div><div class="value">{{.Path}}</div><div class="label" style="margin-top:18px">Peer response time</div><div class="value">{{.Time}}</div></section><div class="footer"><span class="dot"></span>Delivered through Loom · encrypted peer stream</div></main></body></html>`))
+:root{color-scheme:light;font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f5f5f7;color:#1d1d1f}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;padding:24px;background:#f5f5f7}
+main{width:min(680px,100%);padding:32px;margin:8vh auto;border:1px solid #e5e5ea;border-radius:8px;background:#fff}
+.eyebrow{margin:0 0 18px;color:#0071e3;font-size:13px;font-weight:500}
+h1{margin:0 0 8px;font-size:clamp(27px,5vw,40px);letter-spacing:-.04em}.sub{margin:0;color:#6e6e73}.card{margin-top:24px;padding:18px 20px;border:1px solid #e5e5ea;border-radius:6px;background:#fff}.label{color:#6e6e73;font-size:12px}.value{margin-top:5px;overflow-wrap:anywhere;color:#1d1d1f;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px}
+</style></head><body><main><p class="eyebrow">Loom demo service</p><h1>{{.Name}}</h1><p class="sub">Served by {{.Peer}}</p><section class="card"><div class="label">Requested path</div><div class="value">{{.Path}}</div><div class="label" style="margin-top:18px">Response timestamp</div><div class="value">{{.Time}}</div></section></main></body></html>`))
 	httpServer := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
@@ -755,7 +755,7 @@ func (a *App) prepareDemoFolder(target *Node) error {
 	}
 	fixtures := map[string]string{
 		"welcome.txt":      "Loom demo folder sync: this file was copied over an encrypted libp2p stream.\n",
-		"tokens.css":       ":root { --loom-blue: #386be8; --loom-ink: #182235; }\n",
+		"tokens.css":       ":root { --loom-blue: #0071e3; --loom-ink: #1d1d1f; }\n",
 		"notes/design.txt": "Shared workspace sample assets. Change these files to see real folder transfer.\n",
 	}
 	for name, contents := range fixtures {

@@ -377,7 +377,7 @@ func TestDemoUsesRelayForProxyAndFolderTransfersAndReconnects(t *testing.T) {
 	if proxyResponse.Code != http.StatusOK {
 		t.Fatalf("relay proxy status = %d: %s", proxyResponse.Code, proxyResponse.Body.String())
 	}
-	if !strings.Contains(proxyResponse.Body.String(), "Delivered through Loom") || !strings.Contains(proxyResponse.Body.String(), "/status/check") {
+	if !strings.Contains(proxyResponse.Body.String(), statusService.Name) || !strings.Contains(proxyResponse.Body.String(), linux.Name) || !strings.Contains(proxyResponse.Body.String(), "/status/check") {
 		t.Fatalf("unexpected proxied sample page: %s", proxyResponse.Body.String())
 	}
 	if got := proxyResponse.Header().Get("Content-Security-Policy"); !strings.Contains(got, "sandbox") || !strings.Contains(got, "frame-ancestors 'none'") {

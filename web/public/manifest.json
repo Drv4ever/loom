@@ -1,6 +1,6 @@
 {
   "short_name": "Loom",
-  "name": "Loom private workspace",
+  "name": "Loom",
   "icons": [
     {
       "src": "favicon.svg",
@@ -10,6 +10,6 @@
   ],
   "start_url": ".",
   "display": "standalone",
-  "theme_color": "#182235",
-  "background_color": "#f5f7fb"
+  "theme_color": "#f5f5f7",
+  "background_color": "#f5f5f7"
 }

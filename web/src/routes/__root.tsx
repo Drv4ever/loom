@@ -13,12 +13,11 @@ export const Route = createRootRoute({
         content: "width=device-width, initial-scale=1",
       },
       {
-        title: "Loom — Private network workspace",
+        title: "Loom",
       },
       {
-        name: "description",
-        content:
-          "A live view of your private device network, shared services, and synced folders.",
+        name: "theme-color",
+        content: "#f5f5f7",
       },
     ],
     links: [
@@ -26,6 +25,10 @@ export const Route = createRootRoute({
         rel: "icon",
         type: "image/svg+xml",
         href: "/favicon.svg",
+      },
+      {
+        rel: "manifest",
+        href: "/manifest.json",
       },
       {
         rel: "stylesheet",
