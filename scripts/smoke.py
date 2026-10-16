@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import re
@@ -288,21 +289,32 @@ def run_checks(base_url: str, scratch: Path, data_dir: Path) -> None:
 
 
 def main() -> int:
+	parser = argparse.ArgumentParser(description=__doc__)
+	parser.add_argument("--binary", help="use an existing Loom binary instead of building one")
+	args = parser.parse_args()
 	try:
 		with tempfile.TemporaryDirectory(prefix="loom-smoke-") as tmp:
 			scratch = Path(tmp)
-			binary = scratch / "loom"
-			build = subprocess.run(
-				["go", "build", "-o", str(binary), "./cmd/loom"],
-				cwd=ROOT,
-				check=False,
-				text=True,
-				capture_output=True,
-			)
-			if build.returncode != 0:
-				sys.stderr.write(build.stderr)
-				sys.stderr.write(build.stdout)
-				return build.returncode or 1
+			if args.binary:
+				binary = Path(args.binary).expanduser()
+				if not binary.is_absolute():
+					binary = ROOT / binary
+				binary = binary.resolve()
+				if not binary.is_file() or not os.access(binary, os.X_OK):
+					raise SmokeFailure(f"binary was not found or is not executable: {binary}")
+			else:
+				binary = scratch / "loom"
+				build = subprocess.run(
+					["go", "build", "-o", str(binary), "./cmd/loom"],
+					cwd=ROOT,
+					check=False,
+					text=True,
+					capture_output=True,
+				)
+				if build.returncode != 0:
+					sys.stderr.write(build.stderr)
+					sys.stderr.write(build.stdout)
+					return build.returncode or 1
 
 			port = reserve_port()
 			base_url = f"http://127.0.0.1:{port}"
@@ -344,11 +356,11 @@ def main() -> int:
 	except SmokeFailure as error:
 		print(f"FAIL {error}", file=sys.stderr)
 		return 1
-		print("Loom black-box smoke test passed.")
-		return 0
 	except Exception as error:
 		print(f"FAIL {error}", file=sys.stderr)
 		return 1
+	print("Loom black-box demo smoke test passed.")
+	return 0
 
 
 if __name__ == "__main__":

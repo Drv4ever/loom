@@ -47,7 +47,11 @@ Services are published from a device to its loopback HTTP target, such as `http:
 ```sh
 make build  # Go backend and production frontend build
 make test   # Black-box API smoke test with an isolated demo mesh
+make test-peers # Two independent normal-mode peers, local service, and folder transfer
+make check  # Go test/vet, frontend typecheck/lint, and both integration tests
 ```
+
+`make test-peers` gives both temporary nodes the same random private-network key, checks mDNS discovery, then exercises a loopback HTTP service and byte-for-byte folder sync across a restart. It uses an advertised multiaddress only if mDNS discovery is not observed and reports that fallback. Test data and keys live in temporary directories and are removed on exit.
 
 To run the built frontend locally, start `./bin/loom --demo --listen 127.0.0.1:8787 --data-dir .loom-demo` in one terminal and `cd web && bun run start` in another. The preview server uses the same local API and service-proxy routes as the development dashboard.
 
