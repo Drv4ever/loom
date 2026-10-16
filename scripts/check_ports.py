@@ -15,6 +15,7 @@ def main() -> int:
 
 	for port in ports:
 		with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+			sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 			try:
 				sock.bind(("127.0.0.1", port))
 			except OSError as error:
