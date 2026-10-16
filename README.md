@@ -1,0 +1,52 @@
+# Loom
+
+Loom is a small encrypted application mesh for connecting services and copying selected folders between your devices. It uses libp2p for peer communication; it does not create a system VPN, change operating-system routes, or send all device traffic through the mesh.
+
+## Try the local demo
+
+Requirements: Go, Bun, and Python 3. Install the frontend packages once, then start both apps from the repository root:
+
+```sh
+cd web && bun install
+cd ..
+make demo
+```
+
+Open [http://127.0.0.1:3000](http://127.0.0.1:3000). The Go API listens on `127.0.0.1:8787`; its demo data is stored in `.loom-demo/`. The demo creates three real local libp2p nodes named Primary laptop, Studio workstation, and Linux server, including a direct link and a circuit-relayed link. Their names and demo labels identify them as fixtures, not physical remote devices. The demo includes a real local HTTP service and sample folders so service access, file transfer, activity, and reconnect behavior can be exercised without another computer.
+
+`Ctrl-C` stops the two processes started by `make demo`. It does not remove `.loom-demo/`.
+
+## Run on real devices
+
+Install the same Loom version and use one private network key on each device. Generate the key once and keep it in a private file:
+
+```sh
+umask 077
+openssl rand -hex 32 > "$HOME/.loom-network-key"
+export LOOM_NETWORK_KEY="$(cat "$HOME/.loom-network-key")"
+```
+
+Share that key with the other device through a trusted private channel. Do not commit the key, paste it into tickets, or enable shell tracing while using it. Diagnostics omit network-key and private-key material.
+
+Start the backend on each device, giving each its own name and data directory:
+
+```sh
+go run ./cmd/loom \
+  --name "Primary laptop" \
+  --listen 127.0.0.1:8787 \
+  --data-dir "$HOME/.loom" \
+  --network-key "$LOOM_NETWORK_KEY"
+```
+
+On the other device, use a different `--name` and `--data-dir`, but the same key. Devices on the same LAN discover each other through mDNS. Start the dashboard for each local backend with `cd web && bun run dev --host 127.0.0.1`; the dashboard uses port 3000 and the backend uses port 8787. If a peer is on a reachable network without mDNS, add its libp2p multiaddress from the Devices view. A node can be started with `--relay` to provide a circuit relay; Loom does not include a hosted relay service.
+
+Services are published from a device to its loopback HTTP target, such as `http://127.0.0.1:3001`. Loom proxies requests to that approved service over the peer connection. Folder sync copies from the selected local source path to the receiving peer's Loom-managed folder under its data directory. It is one-way; deleting the Loom folder entry stops tracking and does not delete received files. The browser cannot browse another machine's disk, so enter the source path on the device that owns it.
+
+## Build and checks
+
+```sh
+make build  # Go backend and production frontend build
+make test   # Black-box API smoke test with an isolated demo mesh
+```
+
+See [docs/DEMO.md](docs/DEMO.md) for a short walkthrough of the demo and real-device setup.
