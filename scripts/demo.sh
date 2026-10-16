@@ -83,6 +83,14 @@ if ! python3 "$ROOT/scripts/wait_http.py" "http://$FRONTEND_HOST:$FRONTEND_PORT"
 	printf 'Frontend did not become ready at http://%s:%s.\n' "$FRONTEND_HOST" "$FRONTEND_PORT" >&2
 	exit 1
 fi
+if ! python3 "$ROOT/scripts/wait_http.py" "http://$FRONTEND_HOST:$FRONTEND_PORT/api/health"; then
+	printf 'Frontend is running but its API proxy did not become ready.\n' >&2
+	exit 1
+fi
+if ! kill -0 "$frontend_pid" 2>/dev/null || ! kill -0 "$backend_pid" 2>/dev/null; then
+	printf 'A demo process exited before startup completed.\n' >&2
+	exit 1
+fi
 
 printf '\nLoom demo is ready:\n  Dashboard: http://%s:%s\n  API:       http://%s:%s/api/health\n  Data:      %s\n\nPress Ctrl-C to stop both processes.\n' \
 	"$FRONTEND_HOST" "$FRONTEND_PORT" "$BACKEND_HOST" "$BACKEND_PORT" "$DATA_DIR"

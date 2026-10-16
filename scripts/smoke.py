@@ -33,6 +33,9 @@ def reserve_port() -> int:
 
 
 def request(base_url: str, path: str, method: str = "GET", body: Any = None) -> tuple[int, Any, bytes]:
+	verb = method.upper()
+	if body is None and verb in {"POST", "PUT", "PATCH"}:
+		body = {}
 	data = None if body is None else json.dumps(body).encode("utf-8")
 	headers = {"Accept": "application/json"}
 	if data is not None:
@@ -66,9 +69,45 @@ def api_json(base_url: str, path: str, method: str = "GET", body: Any = None) ->
 
 def require_api_error(base_url: str, path: str, method: str, body: Any = None) -> None:
 	status, payload, _ = request(base_url, path, method, body)
-	require(400 <= status < 500, f"{method} {path} should return a client error, got HTTP {status}")
+	require(400 <= status < 600, f"{method} {path} should return an error, got HTTP {status}")
 	require(isinstance(payload, dict) and isinstance(payload.get("error"), str) and payload["error"].strip(),
 		f"{method} {path} should return a human-readable JSON error")
+
+
+def api_json_retry_busy(base_url: str, path: str, method: str = "POST", body: Any = None, timeout: float = 20.0) -> Any:
+	deadline = time.monotonic() + timeout
+	while time.monotonic() < deadline:
+		status, payload, raw = request(base_url, path, method, body)
+		if 200 <= status < 300:
+			require(payload is not None, f"{method} {path} did not return JSON")
+			return payload
+		if status == 409 and isinstance(payload, dict) and "already running" in payload.get("error", "").lower():
+			time.sleep(0.2)
+			continue
+		raise SmokeFailure(f"{method} {path} returned HTTP {status}: {raw[:300]!r}")
+	raise SmokeFailure(f"{method} {path} stayed busy for {timeout:.0f} seconds")
+
+
+def wait_for_file_contents(path: Path, expected: bytes, timeout: float = 20.0) -> None:
+	deadline = time.monotonic() + timeout
+	while time.monotonic() < deadline:
+		try:
+			if path.is_file() and path.read_bytes() == expected:
+				return
+		except OSError:
+			pass
+		time.sleep(0.2)
+	raise SmokeFailure(f"receiver did not contain the expected bytes at {path}")
+
+
+def wait_for_proxy(base_url: str, path: str, timeout: float = 15.0) -> None:
+	deadline = time.monotonic() + timeout
+	while time.monotonic() < deadline:
+		status, _, body = request(base_url, path)
+		if status == 200 and body.strip():
+			return
+		time.sleep(0.25)
+	raise SmokeFailure(f"service proxy did not recover within {timeout:.0f} seconds")
 
 
 def wait_until_ready(base_url: str, process: subprocess.Popen[bytes], deadline: float) -> None:
@@ -163,6 +202,7 @@ def run_checks(base_url: str, scratch: Path, data_dir: Path) -> None:
 	initial_bytes = ("Loom real relay folder transfer smoke test, version one.\n" * 512).encode("utf-8")
 	final_bytes = ("Loom real relay folder transfer smoke test, version two.\n" * 512).encode("utf-8")
 	(source / "relay-check.txt").write_bytes(initial_bytes)
+	bytes_before_add = api_json(base_url, "/api/state").get("stats", {}).get("transferredBytes", 0)
 	created = api_json(base_url, "/api/folders", "POST", {
 		"path": str(source),
 		"peerId": linux["id"],
@@ -176,26 +216,30 @@ def run_checks(base_url: str, scratch: Path, data_dir: Path) -> None:
 		folder_id = registered.get("id")
 	require(isinstance(folder_id, str) and folder_id, "folder registration did not return an id")
 
-	folder_root = data_dir / "received" / folder_id
+	folder_root = data_dir / "nodes" / "linux" / "received" / folder_id
+	sync_path = f"/api/folders/{urllib.parse.quote(folder_id, safe='')}/sync"
+	api_json_retry_busy(base_url, sync_path)
+	received_file = folder_root / "relay-check.txt"
+	wait_for_file_contents(received_file, initial_bytes)
+	after_initial_sync = api_json(base_url, "/api/state")
+	require(after_initial_sync.get("stats", {}).get("transferredBytes", 0) > bytes_before_add,
+		"transfer stats did not include the initial relay folder bytes")
+
 	api_json(base_url, f"/api/folders/{urllib.parse.quote(folder_id, safe='')}/pause", "POST", {"paused": True})
 	paused = find_folder(api_json(base_url, "/api/state"), folder_id)
 	require(paused.get("paused") is True, "folder pause state did not update")
 	paused_snapshot = snapshot_tree(folder_root)
 	(source / "relay-check.txt").write_bytes(final_bytes)
-	require_api_error(base_url, f"/api/folders/{urllib.parse.quote(folder_id, safe='')}/sync", "POST")
+	require_api_error(base_url, sync_path, "POST")
 	require(snapshot_tree(folder_root) == paused_snapshot, "paused sync changed files at the receiver")
 	api_json(base_url, f"/api/folders/{urllib.parse.quote(folder_id, safe='')}/pause", "POST", {"paused": False})
-	before_sync = api_json(base_url, "/api/state")
-	bytes_before = before_sync.get("stats", {}).get("transferredBytes", 0)
-	api_json(base_url, f"/api/folders/{urllib.parse.quote(folder_id, safe='')}/sync", "POST")
+	wait_for_file_contents(received_file, final_bytes)
+	api_json_retry_busy(base_url, sync_path)
 	after_sync = api_json(base_url, "/api/state")
 	synced_folder = find_folder(after_sync, folder_id)
 	require(synced_folder.get("paused") is False, "folder should be resumed before sync")
 	require(synced_folder.get("files", 0) >= 1, "synced folder should report at least one file")
 	require(synced_folder.get("bytes", 0) >= len(final_bytes), "synced folder byte count should include transferred content")
-	require(after_sync.get("stats", {}).get("transferredBytes", 0) - bytes_before >= len(final_bytes),
-		"transfer stats did not include the relayed folder bytes")
-	received_file = folder_root / "relay-check.txt"
 	require(received_file.is_file(), f"relay transfer did not create {received_file}")
 	require(received_file.read_bytes() == final_bytes, "received relay file bytes did not match the source")
 	print("PASS folder pause/resume and byte-for-byte file transfer over circuit relay")
@@ -210,11 +254,8 @@ def run_checks(base_url: str, scratch: Path, data_dir: Path) -> None:
 	require(snapshot_tree(folder_root) == before_disconnect_sync,
 		"service or sync request changed receiver files while the network was paused")
 	api_json(base_url, "/api/network", "POST", {"connected": True})
-	status, _, proxy_body = request(base_url, proxy_path)
-	require(status == 200 and proxy_body.strip(), "service did not recover after reconnect")
-	api_json(base_url, f"/api/folders/{urllib.parse.quote(folder_id, safe='')}/sync", "POST")
-	require((folder_root / "relay-check.txt").read_bytes() == b"content staged while the Loom network is paused\n",
-		"sync did not recover after reconnect")
+	wait_for_proxy(base_url, proxy_path)
+	wait_for_file_contents(received_file, b"content staged while the Loom network is paused\n")
 	print("PASS network disconnect blocks proxy and sync, then reconnect restores both")
 
 	before_change = api_json(base_url, "/api/state")

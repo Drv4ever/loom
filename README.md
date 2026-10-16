@@ -49,4 +49,6 @@ make build  # Go backend and production frontend build
 make test   # Black-box API smoke test with an isolated demo mesh
 ```
 
+To run the built frontend locally, start `./bin/loom --demo --listen 127.0.0.1:8787 --data-dir .loom-demo` in one terminal and `cd web && bun run start` in another. The preview server uses the same local API and service-proxy routes as the development dashboard.
+
 See [docs/DEMO.md](docs/DEMO.md) for a short walkthrough of the demo and real-device setup.
