@@ -15,7 +15,7 @@ curl -sS -X POST http://127.0.0.1:8787/api/demo/change \
   -H 'Content-Type: application/json' -d '{}'
 ```
 
-“Loom creates a new sample file and reports success only after it has transferred to Linux through the relay. The folder status, transferred bytes, and Activity entry update from that transfer.” To show flow control, pause the folder, trigger **Sync now**, and show that the paused folder does not transfer; resume it and sync again.
+“Loom creates a new sample file and reports success only after it has transferred to Linux through the relay. The folder status, transferred bytes, and Activity entry update from that transfer.” To show flow control, pause the folder, trigger **Sync now**, and show the paused-folder error with no transfer; resume it and wait for the transfer to complete.
 
 **1:40–2:30 — Reconnect.** Turn off the **Networking** switch, then show the peer's offline state and unavailable service. Turn it back on and wait for the peer and service to return. If you need the API control directly, use:
 

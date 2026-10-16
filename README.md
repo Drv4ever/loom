@@ -4,7 +4,7 @@ Loom is a small encrypted application mesh for connecting services and copying s
 
 ## Try the local demo
 
-Requirements: Go, Bun, and Python 3. Install the frontend packages once, then start both apps from the repository root:
+Requirements: Go 1.27 or newer, Bun, and Python 3. OpenSSL is needed to generate a shared key for real devices. Install the frontend packages once, then start both apps from the repository root:
 
 ```sh
 cd web && bun install
