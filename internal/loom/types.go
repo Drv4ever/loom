@@ -27,31 +27,36 @@ type Device struct {
 }
 
 type Service struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	DeviceID   string `json:"deviceId"`
-	DeviceName string `json:"deviceName"`
-	Protocol   string `json:"protocol"`
-	Target     string `json:"target"`
-	Port       int    `json:"port"`
-	Status     string `json:"status"`
-	URL        string `json:"url"`
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	DeviceID     string   `json:"deviceId"`
+	DeviceName   string   `json:"deviceName"`
+	Protocol     string   `json:"protocol"`
+	Target       string   `json:"target"`
+	Port         int      `json:"port"`
+	Status       string   `json:"status"`
+	URL          string   `json:"url"`
+	Trusted      bool     `json:"trusted"`
+	AllowedPeers []string `json:"allowedPeers,omitempty"`
 }
 
 type Folder struct {
-	ID       string            `json:"id"`
-	Name     string            `json:"name"`
-	Path     string            `json:"path"`
-	PeerID   string            `json:"peerId"`
-	PeerName string            `json:"peerName"`
-	Status   string            `json:"status"`
-	Files    int               `json:"files"`
-	Bytes    int64             `json:"bytes"`
-	Progress int               `json:"progress"`
-	LastSync time.Time         `json:"lastSync"`
-	Paused   bool              `json:"paused"`
-	Error    string            `json:"error"`
-	Manifest map[string]string `json:"-"`
+	ID           string            `json:"id"`
+	Name         string            `json:"name"`
+	Path         string            `json:"path"`
+	PeerID       string            `json:"peerId"`
+	PeerName     string            `json:"peerName"`
+	Status       string            `json:"status"`
+	Files        int               `json:"files"`
+	Bytes        int64             `json:"bytes"`
+	Progress     int               `json:"progress"`
+	LastSync     time.Time         `json:"lastSync"`
+	Paused       bool              `json:"paused"`
+	Error        string            `json:"error"`
+	Conflicts    int               `json:"conflicts"`
+	AllowedPeers []string          `json:"allowedPeers,omitempty"`
+	ReadOnly     bool              `json:"readOnly,omitempty"`
+	Manifest     map[string]string `json:"-"`
 }
 
 type Activity struct {
@@ -83,17 +88,29 @@ type Stats struct {
 type State struct {
 	Network         NetworkState     `json:"network"`
 	Devices         []Device         `json:"devices"`
+	BlockedDevices  []string         `json:"blockedDevices"`
 	Services        []Service        `json:"services"`
+	Forwards        []*Forward       `json:"forwards"`
 	Folders         []Folder         `json:"folders"`
 	ReceivedFolders []ReceivedFolder `json:"receivedFolders"`
+	Relays          []string         `json:"relays"`
 	Activity        []Activity       `json:"activity"`
 	Stats           Stats            `json:"stats"`
 }
 
+type RelayInfo struct {
+	Address string `json:"address"`
+	PeerID  string `json:"peerId"`
+	Status  string `json:"status"` // "connected", "unreachable", "configured"
+	Error   string `json:"error,omitempty"`
+}
+
 type ServiceRecord struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	Target string `json:"target"`
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	Target       string   `json:"target"`
+	Trusted      bool     `json:"trusted"`
+	AllowedPeers []string `json:"allowedPeers,omitempty"`
 }
 
 type PeerSummary struct {

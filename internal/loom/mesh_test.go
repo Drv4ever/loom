@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -74,8 +75,10 @@ func TestLoadNetworkKeySecuresExistingKeyFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if mode := info.Mode().Perm(); mode != 0600 {
-		t.Fatalf("stored network key permissions = %04o, want 0600", mode)
+	if runtime.GOOS != "windows" {
+		if mode := info.Mode().Perm(); mode != 0600 {
+			t.Fatalf("stored network key permissions = %04o, want 0600", mode)
+		}
 	}
 }
 

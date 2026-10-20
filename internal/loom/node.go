@@ -2,7 +2,6 @@ package loom
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -57,6 +56,7 @@ type NodeOptions struct {
 	ListenAddress string
 	RelayService  bool
 	AllowLoopback bool
+	IsBlocked     func(peer.ID) bool
 }
 
 type Node struct {
@@ -74,18 +74,49 @@ type Node struct {
 	closed       bool
 	enabled      *atomic.Bool
 	receiveMu    sync.Mutex
+
+	trash             *TrashManager
+	conflicts         *ConflictStore
+	tombstones        map[string]map[string]time.Time
+	getCustomPath     func(folderID string) string
+	checkFolderAccess func(folderID, peerID string, isWrite bool) error
 }
 
-type nodeGater struct{ enabled *atomic.Bool }
+type nodeGater struct {
+	enabled   *atomic.Bool
+	isBlocked func(peer.ID) bool
+}
 
-func (g nodeGater) InterceptPeerDial(peer.ID) bool               { return g.enabled.Load() }
-func (g nodeGater) InterceptAddrDial(peer.ID, ma.Multiaddr) bool { return g.enabled.Load() }
-func (g nodeGater) InterceptAccept(network.ConnMultiaddrs) bool  { return g.enabled.Load() }
-func (g nodeGater) InterceptSecured(network.Direction, peer.ID, network.ConnMultiaddrs) bool {
+func (g nodeGater) InterceptPeerDial(p peer.ID) bool {
+	if !g.enabled.Load() || (g.isBlocked != nil && g.isBlocked(p)) {
+		return false
+	}
+	return true
+}
+
+func (g nodeGater) InterceptAddrDial(p peer.ID, _ ma.Multiaddr) bool {
+	if !g.enabled.Load() || (g.isBlocked != nil && g.isBlocked(p)) {
+		return false
+	}
+	return true
+}
+
+func (g nodeGater) InterceptAccept(network.ConnMultiaddrs) bool {
 	return g.enabled.Load()
 }
-func (g nodeGater) InterceptUpgraded(network.Conn) (bool, control.DisconnectReason) {
-	return g.enabled.Load(), 0
+
+func (g nodeGater) InterceptSecured(_ network.Direction, p peer.ID, _ network.ConnMultiaddrs) bool {
+	if !g.enabled.Load() || (g.isBlocked != nil && g.isBlocked(p)) {
+		return false
+	}
+	return true
+}
+
+func (g nodeGater) InterceptUpgraded(c network.Conn) (bool, control.DisconnectReason) {
+	if !g.enabled.Load() || (g.isBlocked != nil && g.isBlocked(c.RemotePeer())) {
+		return false, control.DisconnectReason(1)
+	}
+	return true, 0
 }
 
 var _ connmgr.ConnectionGater = nodeGater{}
@@ -125,7 +156,10 @@ func NewNode(opts NodeOptions) (*Node, error) {
 		libp2p.PrivateNetwork(pnet.PSK(opts.NetworkKey)),
 		libp2p.ListenAddrStrings(opts.ListenAddress),
 		libp2p.UserAgent("loom/" + Version),
-		libp2p.ConnectionGater(nodeGater{enabled: &enabled}),
+		libp2p.ConnectionGater(nodeGater{enabled: &enabled, isBlocked: opts.IsBlocked}),
+		libp2p.EnableNATService(),
+		libp2p.EnableHolePunching(),
+		libp2p.EnableRelay(),
 	}
 	if opts.RelayService {
 		libp2pOptions = append(libp2pOptions, libp2p.ForceReachabilityPublic())
@@ -156,6 +190,9 @@ func NewNode(opts NodeOptions) (*Node, error) {
 		Host: h, Name: opts.Name, Platform: opts.Platform, ReceiveDir: opts.ReceiveDir,
 		HistoryDir: filepath.Join(opts.DataDir, "history"), services: make(map[string]ServiceRecord), enabled: &enabled,
 		received: make(map[string]ReceivedFolder), receivedPath: filepath.Join(opts.DataDir, "received.json"),
+		trash:      NewTrashManager(filepath.Join(opts.DataDir, "trash"), 30*24*time.Hour),
+		conflicts:  NewConflictStore(),
+		tombstones: make(map[string]map[string]time.Time),
 	}
 	if err := n.loadReceived(); err != nil {
 		_ = h.Close()
@@ -164,11 +201,38 @@ func NewNode(opts NodeOptions) (*Node, error) {
 	h.SetStreamHandler(infoProtocol, n.handleInfo)
 	h.SetStreamHandler(httpProtocol, n.handleHTTP)
 	h.SetStreamHandler(folderProtocol, n.handleFolder)
+	h.SetStreamHandler(syncProtocol, n.handleBidirectionalSync)
+	h.SetStreamHandler(tcpForwardProtocol, n.handleTCPForward)
 	return n, nil
 }
 
 func (n *Node) SetEnabled(enabled bool) {
 	n.enabled.Store(enabled)
+}
+
+// ClosePeer immediately terminates all active connections to the specified peer.
+func (n *Node) ClosePeer(p peer.ID) error {
+	if n == nil || n.Host == nil {
+		return nil
+	}
+	return n.Host.Network().ClosePeer(p)
+}
+
+// IsRelayed checks if the active connection to a peer is through a circuit relay.
+func (n *Node) IsRelayed(id peer.ID) bool {
+	if n == nil || n.Host == nil {
+		return false
+	}
+	conns := n.Host.Network().ConnsToPeer(id)
+	if len(conns) == 0 {
+		return false
+	}
+	for _, c := range conns {
+		if strings.Contains(c.RemoteMultiaddr().String(), "p2p-circuit") {
+			return true
+		}
+	}
+	return false
 }
 
 func loadOrCreateIdentity(file string) (crypto.PrivKey, error) {
@@ -318,10 +382,7 @@ func (n *Node) handleHTTP(stream network.Stream) {
 		return
 	}
 	defer req.Body.Close()
-	if req.ContentLength > maxProxyBody {
-		writeSimpleHTTPError(stream, http.StatusRequestEntityTooLarge, "request body too large")
-		return
-	}
+
 	serviceID := req.Header.Get("X-Loom-Service-ID")
 	req.Header.Del("X-Loom-Service-ID")
 	n.mu.RLock()
@@ -329,6 +390,11 @@ func (n *Node) handleHTTP(stream network.Stream) {
 	n.mu.RUnlock()
 	if !ok {
 		writeSimpleHTTPError(stream, http.StatusNotFound, "service is not published")
+		return
+	}
+	remotePeer := stream.Conn().RemotePeer().String()
+	if len(service.AllowedPeers) > 0 && !containsPeer(service.AllowedPeers, remotePeer) {
+		writeSimpleHTTPError(stream, http.StatusForbidden, "service access denied for this device")
 		return
 	}
 	pathPart, err := safeServicePath(req.URL)
@@ -354,28 +420,44 @@ func (n *Node) handleHTTP(stream network.Stream) {
 	}
 	target.RawQuery = req.URL.RawQuery
 	target.Fragment = ""
-	bodyBytes := []byte(nil)
-	if req.Body != nil {
-		bodyBytes, err = io.ReadAll(io.LimitReader(req.Body, maxProxyBody+1))
-		if err != nil || len(bodyBytes) > maxProxyBody {
-			writeSimpleHTTPError(stream, http.StatusRequestEntityTooLarge, "request body too large")
+
+	// Support WebSocket upgrade
+	if isWebSocketUpgrade(req) {
+		targetConn, err := net.DialTimeout("tcp", target.Host, 5*time.Second)
+		if err != nil {
+			writeSimpleHTTPError(stream, http.StatusBadGateway, "published service is unavailable")
 			return
 		}
+		defer targetConn.Close()
+
+		req.URL.Path = target.Path
+		req.Host = target.Host
+		if err := req.Write(targetConn); err != nil {
+			writeSimpleHTTPError(stream, http.StatusBadGateway, "failed to send websocket handshake to service")
+			return
+		}
+
+		bridgeConns(targetConn, stream)
+		return
 	}
-	outReq, err := http.NewRequestWithContext(context.Background(), req.Method, target.String(), bytes.NewReader(bodyBytes))
+
+	outReq, err := http.NewRequestWithContext(context.Background(), req.Method, target.String(), req.Body)
 	if err != nil {
 		writeSimpleHTTPError(stream, http.StatusBadRequest, "invalid request")
 		return
 	}
+	outReq.ContentLength = req.ContentLength
 	copyEndToEndHeaders(outReq.Header, req.Header)
-	outReq.Header.Del("Authorization")
-	outReq.Header.Del("Cookie")
-	outReq.Header.Del("Origin")
-	outReq.Header.Del("Referer")
+	if !service.Trusted {
+		outReq.Header.Del("Authorization")
+		outReq.Header.Del("Cookie")
+		outReq.Header.Del("Origin")
+		outReq.Header.Del("Referer")
+	}
 	outReq.Host = target.Host
 	client := &http.Client{
-		Timeout:       35 * time.Second,
-		Transport:     &http.Transport{Proxy: nil, DisableKeepAlives: true, ResponseHeaderTimeout: 20 * time.Second},
+		Timeout:       60 * time.Second,
+		Transport:     &http.Transport{Proxy: nil, DisableKeepAlives: true, ResponseHeaderTimeout: 30 * time.Second},
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 	resp, err := client.Do(outReq)
@@ -384,17 +466,10 @@ func (n *Node) handleHTTP(stream network.Stream) {
 		return
 	}
 	defer resp.Body.Close()
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxProxyReply+1))
-	if err != nil || len(respBody) > maxProxyReply {
-		writeSimpleHTTPError(stream, http.StatusBadGateway, "service response is too large")
-		return
-	}
+
 	cleanHeaders := make(http.Header)
 	copyEndToEndHeaders(cleanHeaders, resp.Header)
 	resp.Header = cleanHeaders
-	resp.Body = io.NopCloser(strings.NewReader(string(respBody)))
-	resp.ContentLength = int64(len(respBody))
-	resp.TransferEncoding = nil
 	_ = resp.Write(stream)
 }
 
@@ -441,6 +516,20 @@ func copyEndToEndHeaders(dst, src http.Header) {
 		}
 		dst[canonical] = append([]string(nil), values...)
 	}
+}
+
+func isWebSocketUpgrade(req *http.Request) bool {
+	if strings.EqualFold(req.Header.Get("Upgrade"), "websocket") {
+		return true
+	}
+	for _, v := range req.Header.Values("Connection") {
+		for _, part := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(part), "upgrade") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func validateLoopbackHTTPURL(raw string) (*url.URL, error) {
@@ -782,4 +871,14 @@ func isID(value string) bool {
 		}
 	}
 	return true
+}
+
+func containsPeer(peers []string, target string) bool {
+	target = strings.TrimSpace(target)
+	for _, p := range peers {
+		if strings.TrimSpace(p) == target {
+			return true
+		}
+	}
+	return false
 }

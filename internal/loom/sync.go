@@ -9,11 +9,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
-
-	"github.com/libp2p/go-libp2p/core/network"
 )
 
 var (
@@ -48,6 +45,10 @@ func (a *App) syncLoop() {
 }
 
 func (a *App) addFolder(path, peerID, name string) (Folder, error) {
+	return a.addFolderWithOptions(path, peerID, name, nil, false)
+}
+
+func (a *App) addFolderWithOptions(path, peerID, name string, allowedPeers []string, readOnly bool) (Folder, error) {
 	if !filepath.IsAbs(path) {
 		return Folder{}, fmt.Errorf("folder path must be absolute")
 	}
@@ -81,7 +82,17 @@ func (a *App) addFolder(path, peerID, name string) (Folder, error) {
 	if err != nil {
 		return Folder{}, err
 	}
-	folder := Folder{ID: id, Name: name, Path: resolved, PeerID: peerID, PeerName: peerInfo.Device.Name, Status: "pending", Manifest: nil}
+	folder := Folder{
+		ID:           id,
+		Name:         name,
+		Path:         resolved,
+		PeerID:       peerID,
+		PeerName:     peerInfo.Device.Name,
+		Status:       "pending",
+		AllowedPeers: allowedPeers,
+		ReadOnly:     readOnly,
+		Manifest:     nil,
+	}
 	a.folders[id] = &folderEntry{Folder: folder, manifest: make(map[string]string)}
 	a.addActivityLocked("sync", "Folder added", fmt.Sprintf("%s is ready to sync with %s.", name, peerInfo.Device.Name))
 	if err := a.persistLocked(); err != nil {
@@ -140,143 +151,7 @@ func (a *App) setFolderPaused(id string, paused bool) (Folder, error) {
 }
 
 func (a *App) syncFolder(requestCtx context.Context, id string) error {
-	a.mu.Lock()
-	entry, ok := a.folders[id]
-	if !ok {
-		a.mu.Unlock()
-		return os.ErrNotExist
-	}
-	if !a.connected {
-		a.mu.Unlock()
-		return errNetworkPaused
-	}
-	if entry.Folder.Paused {
-		a.mu.Unlock()
-		return errFolderPaused
-	}
-	if entry.syncing {
-		a.mu.Unlock()
-		return errFolderBusy
-	}
-	peerID, err := parsePeerID(entry.Folder.PeerID)
-	if err != nil {
-		a.mu.Unlock()
-		return err
-	}
-	connectedness := a.main.Host.Network().Connectedness(peerID)
-	if connectedness != network.Connected && connectedness != network.Limited {
-		a.mu.Unlock()
-		return fmt.Errorf("selected device is offline")
-	}
-	entry.syncing = true
-	entry.Folder.Status = "syncing"
-	entry.Folder.Error = ""
-	entry.Folder.Progress = 0
-	syncCtx, cancel := context.WithCancel(a.ctx)
-	defer cancel()
-	entry.cancel = cancel
-	previous := make(map[string]string, len(entry.manifest))
-	for path, digest := range entry.manifest {
-		previous[path] = digest
-	}
-	folder := entry.Folder
-	_ = a.persistLocked()
-	a.mu.Unlock()
-	if requestCtx != nil {
-		stop := context.AfterFunc(requestCtx, cancel)
-		defer stop()
-	}
-
-	files, totalBytes, err := scanFolder(folder.Path)
-	if err != nil {
-		a.finishSync(id, err, 0, nil)
-		return err
-	}
-	a.mu.Lock()
-	if current := a.folders[id]; current == nil {
-		a.mu.Unlock()
-		return os.ErrNotExist
-	} else {
-		current.Folder.Files = len(files)
-		current.Folder.Bytes = totalBytes
-		current.Folder.Progress = 0
-		_ = a.persistLocked()
-	}
-	a.mu.Unlock()
-
-	sourceRoot, err := os.OpenRoot(folder.Path)
-	if err != nil {
-		a.finishSync(id, err, 0, nil)
-		return err
-	}
-	defer sourceRoot.Close()
-	paths := make([]string, 0, len(files))
-	for name := range files {
-		paths = append(paths, name)
-	}
-	sort.Strings(paths)
-	transferred := int64(0)
-	changed := 0
-	newManifest := make(map[string]string, len(files))
-	for i, name := range paths {
-		if err := syncContextError(syncCtx); err != nil {
-			a.finishSync(id, err, transferred, newManifest)
-			return err
-		}
-		desc := files[name]
-		if previous[name] == desc.SHA256 {
-			newManifest[name] = desc.SHA256
-			continue
-		}
-		input, err := sourceRoot.Open(filepath.FromSlash(name))
-		if err != nil {
-			a.finishSync(id, err, transferred, newManifest)
-			return fmt.Errorf("open source file %s: %w", name, err)
-		}
-		n, transferErr := a.main.TransferFile(network.WithAllowLimitedConn(syncCtx, "loom folder sync"), peerID, id, desc, input, folder.Name)
-		closeErr := input.Close()
-		transferred += n
-		if transferErr != nil {
-			a.finishSync(id, transferErr, transferred, newManifest)
-			return fmt.Errorf("transfer %s: %w", name, transferErr)
-		}
-		if closeErr != nil {
-			a.finishSync(id, closeErr, transferred, newManifest)
-			return closeErr
-		}
-		changed++
-		newManifest[name] = desc.SHA256
-		a.mu.Lock()
-		a.transferredBytes += n
-		if current := a.folders[id]; current != nil {
-			current.Folder.Progress = (i + 1) * 100 / max(1, len(files))
-			current.manifest[name] = desc.SHA256
-		}
-		_ = a.persistLocked()
-		a.mu.Unlock()
-	}
-	if err := syncContextError(syncCtx); err != nil {
-		a.finishSync(id, err, transferred, newManifest)
-		return err
-	}
-	a.mu.Lock()
-	if current := a.folders[id]; current != nil {
-		current.syncing = false
-		current.cancel = nil
-		current.manifest = newManifest
-		current.Folder.Files = len(files)
-		current.Folder.Bytes = totalBytes
-		current.Folder.Progress = 100
-		current.Folder.Status = "synced"
-		current.Folder.LastSync = time.Now().UTC()
-		current.Folder.Error = ""
-		if changed > 0 {
-			a.addActivityLocked("sync", "Folder synced", fmt.Sprintf("Transferred %d file(s) to %s.", changed, current.Folder.PeerName))
-		}
-	}
-	_ = a.persistLocked()
-	a.mu.Unlock()
-	return nil
+	return a.syncBidirectional(requestCtx, id)
 }
 
 func syncContextError(ctx context.Context) error {
@@ -329,6 +204,8 @@ func scanFolder(rootPath string) (map[string]fileDescriptor, int64, error) {
 	defer root.Close()
 	files := make(map[string]fileDescriptor)
 	var total int64
+	matcher := LoadIgnoreMatcher(rootPath)
+
 	err = filepath.WalkDir(rootPath, func(fullPath string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -336,13 +213,27 @@ func scanFolder(rootPath string) (map[string]fileDescriptor, int64, error) {
 		if fullPath == rootPath {
 			return nil
 		}
-		if entry.Type()&os.ModeSymlink != 0 {
+		relative, err := filepath.Rel(rootPath, fullPath)
+		if err != nil {
+			return err
+		}
+		name := filepath.ToSlash(relative)
+		if !validRelativePath(name) || strings.HasPrefix(filepath.Base(name), ".loom-part-") {
 			if entry.IsDir() {
 				return filepath.SkipDir
 			}
 			return nil
 		}
 		if entry.IsDir() {
+			if matcher.ShouldIgnore(name, true) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		if matcher.ShouldIgnore(name, false) {
 			return nil
 		}
 		info, err := entry.Info()
@@ -352,23 +243,12 @@ func scanFolder(rootPath string) (map[string]fileDescriptor, int64, error) {
 		if !info.Mode().IsRegular() {
 			return nil
 		}
-		relative, err := filepath.Rel(rootPath, fullPath)
-		if err != nil {
-			return err
-		}
-		name := filepath.ToSlash(relative)
-		if !validRelativePath(name) || strings.HasPrefix(name, ".loom-part-") {
-			return nil
-		}
-		if info.Size() > maxFileSize {
-			return fmt.Errorf("%s exceeds the %d MB per-file limit", name, maxFileSize>>20)
-		}
 		file, err := root.Open(filepath.FromSlash(name))
 		if err != nil {
 			return err
 		}
 		hash := sha256.New()
-		read, readErr := io.Copy(hash, io.LimitReader(file, maxFileSize+1))
+		read, readErr := io.Copy(hash, file)
 		closeErr := file.Close()
 		if readErr != nil {
 			return readErr
@@ -380,9 +260,6 @@ func scanFolder(rootPath string) (map[string]fileDescriptor, int64, error) {
 			return fmt.Errorf("%s changed while it was being scanned", name)
 		}
 		total += read
-		if total > 1<<30 {
-			return fmt.Errorf("folder exceeds the 1 GB sync limit")
-		}
 		files[name] = fileDescriptor{Path: name, Size: read, ModTime: info.ModTime(), SHA256: hex.EncodeToString(hash.Sum(nil))}
 		return nil
 	})
