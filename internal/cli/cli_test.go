@@ -19,7 +19,6 @@ func mockState() loom.State {
 			ID:        "loom-test-net",
 			Name:      "Test Mesh",
 			Connected: true,
-			Demo:      false,
 			PeerID:    "12D3KooWPrimaryPeerID",
 			Addresses: []string{"/ip4/192.168.1.10/tcp/4001/p2p/12D3KooWPrimaryPeerID"},
 			Version:   "0.1.0",

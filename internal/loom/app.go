@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html/template"
 	"io"
 	"net"
 	"net/http"
@@ -32,7 +31,6 @@ type Config struct {
 	DataDir    string
 	NetworkKey string
 	PeerListen string
-	Demo       bool
 	Relay      bool
 	Relays     []string
 }
@@ -72,7 +70,6 @@ type App struct {
 	mu               sync.RWMutex
 	name             string
 	networkID        string
-	demo             bool
 	connected        bool
 	dataDir          string
 	statePath        string
@@ -121,7 +118,7 @@ func New(ctx context.Context, config Config) (*App, error) {
 		config.Listen = "127.0.0.1:8787"
 	}
 	a := &App{
-		name: config.Name, demo: config.Demo, connected: true, dataDir: dataDir,
+		name: config.Name, connected: true, dataDir: dataDir,
 		statePath: filepath.Join(dataDir, "state.json"), networkKey: key, nodes: make(map[string]*Node),
 		peers: make(map[string]*peerEntry), services: make(map[string]ServiceRecord),
 		remoteServices: make(map[string][]ServiceRecord), forceRelay: make(map[string]bool), relayInfos: make(map[string]peer.AddrInfo),
@@ -134,45 +131,38 @@ func New(ctx context.Context, config Config) (*App, error) {
 	if a.name == "" {
 		a.name = "Personal workspace"
 	}
-	if config.Demo {
-		if err := a.startDemo(config); err != nil {
-			_ = a.Close(context.Background())
-			return nil, err
+	mainDir := filepath.Join(dataDir, "node")
+	node, err := NewNode(NodeOptions{
+		Name: deviceName(config.Name), Platform: runtime.GOOS, DataDir: mainDir,
+		IdentityPath: filepath.Join(dataDir, "identity.key"),
+		ReceiveDir:   filepath.Join(dataDir, "received"), NetworkKey: key, ListenAddress: config.PeerListen, RelayService: config.Relay,
+		IsBlocked: func(p peer.ID) bool {
+			return a.IsPeerBlocked(p.String())
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	a.main = node
+	node.getCustomPath = func(folderID string) string {
+		a.mu.RLock()
+		defer a.mu.RUnlock()
+		if f, ok := a.folders[folderID]; ok && f.Folder.Path != "" {
+			return f.Folder.Path
 		}
-	} else {
-		mainDir := filepath.Join(dataDir, "node")
-		node, err := NewNode(NodeOptions{
-			Name: deviceName(config.Name), Platform: runtime.GOOS, DataDir: mainDir,
-			IdentityPath: filepath.Join(dataDir, "identity.key"),
-			ReceiveDir:   filepath.Join(dataDir, "received"), NetworkKey: key, ListenAddress: config.PeerListen, RelayService: config.Relay,
-			IsBlocked: func(p peer.ID) bool {
-				return a.IsPeerBlocked(p.String())
-			},
-		})
-		if err != nil {
-			return nil, err
-		}
-		a.main = node
-		node.getCustomPath = func(folderID string) string {
-			a.mu.RLock()
-			defer a.mu.RUnlock()
-			if f, ok := a.folders[folderID]; ok && f.Folder.Path != "" {
-				return f.Folder.Path
-			}
-			return ""
-		}
-		node.checkFolderAccess = func(folderID, peerID string, isWrite bool) error {
-			return a.checkFolderAccess(folderID, peerID, isWrite)
-		}
-		a.nodes[node.Host.ID().String()] = node
-		a.loadPersisted()
-		node.SetEnabled(a.connected)
-		if err := node.StartMDNS(func(info peer.AddrInfo) {
-			go a.connectPeer(info)
-		}); err != nil {
-			_ = node.Close()
-			return nil, err
-		}
+		return ""
+	}
+	node.checkFolderAccess = func(folderID, peerID string, isWrite bool) error {
+		return a.checkFolderAccess(folderID, peerID, isWrite)
+	}
+	a.nodes[node.Host.ID().String()] = node
+	a.loadPersisted()
+	node.SetEnabled(a.connected)
+	if err := node.StartMDNS(func(info peer.AddrInfo) {
+		go a.connectPeer(info)
+	}); err != nil {
+		_ = node.Close()
+		return nil, err
 	}
 	for _, r := range config.Relays {
 		r = strings.TrimSpace(r)
@@ -408,9 +398,7 @@ func (a *App) refreshPeers() {
 		relayInfo := a.relayInfos[idString]
 		a.mu.RUnlock()
 		if forceRelay && connection != "relay" {
-			// The target can advertise its direct address during the relay handshake.
-			// The demo deliberately keeps this edge on the relay so the UI reflects
-			// the path actually used for service and folder traffic.
+			// If forced relay is configured, disconnect direct link and keep the relay path.
 			_ = a.main.Host.Network().ClosePeer(id)
 			continue
 		}
@@ -584,7 +572,6 @@ func (a *App) State() State {
 	a.mu.RLock()
 	connected := a.connected
 	name := a.name
-	demo := a.demo
 	folders := make([]Folder, 0, len(a.folders))
 	for _, entry := range a.folders {
 		folder := entry.Folder
@@ -661,7 +648,7 @@ func (a *App) State() State {
 		forwards = a.forwards.ListForwards()
 	}
 	return State{
-		Network: NetworkState{ID: a.networkID, Name: name, Connected: connected, Demo: demo, PeerID: func() string {
+		Network: NetworkState{ID: a.networkID, Name: name, Connected: connected, PeerID: func() string {
 			if a.main != nil {
 				return a.main.Host.ID().String()
 			}
@@ -717,201 +704,6 @@ func (a *App) Close(ctx context.Context) error {
 	}
 	for _, node := range a.nodes {
 		_ = node.Close()
-	}
-	return nil
-}
-
-func (a *App) startDemo(config Config) error {
-	primaryDir := filepath.Join(a.dataDir, "nodes", "primary")
-	studioDir := filepath.Join(a.dataDir, "nodes", "studio")
-	linuxDir := filepath.Join(a.dataDir, "nodes", "linux")
-	for _, dir := range []string{primaryDir, studioDir, linuxDir} {
-		if err := os.MkdirAll(dir, 0700); err != nil {
-			return fmt.Errorf("create demo node folder: %w", err)
-		}
-	}
-	primary, err := NewNode(NodeOptions{
-		Name: "MacBook Pro", Platform: "darwin", DataDir: primaryDir, IdentityPath: filepath.Join(primaryDir, "identity.key"),
-		ReceiveDir: filepath.Join(primaryDir, "received"), NetworkKey: a.networkKey, ListenAddress: "/ip4/127.0.0.1/tcp/0",
-		IsBlocked: func(p peer.ID) bool {
-			return a.IsPeerBlocked(p.String())
-		},
-	})
-	if err != nil {
-		return err
-	}
-	primary.checkFolderAccess = func(folderID, peerID string, isWrite bool) error {
-		return a.checkFolderAccess(folderID, peerID, isWrite)
-	}
-	a.main = primary
-	a.nodes[primary.Host.ID().String()] = primary
-	a.loadPersisted()
-	// Demo topology is also assembled on startup when a pause was persisted.
-	// The primary is disabled again after the relay route is ready.
-	primary.SetEnabled(true)
-	studio, err := NewNode(NodeOptions{Name: "Studio Workstation", Platform: "darwin", DataDir: studioDir, IdentityPath: filepath.Join(studioDir, "identity.key"), ReceiveDir: filepath.Join(studioDir, "received"), NetworkKey: a.networkKey, ListenAddress: "/ip4/127.0.0.1/tcp/0", RelayService: true, AllowLoopback: true})
-	if err != nil {
-		return err
-	}
-	linux, err := NewNode(NodeOptions{Name: "Linux Server", Platform: "linux", DataDir: linuxDir, IdentityPath: filepath.Join(linuxDir, "identity.key"), ReceiveDir: filepath.Join(linuxDir, "received"), NetworkKey: a.networkKey, ListenAddress: "/ip4/127.0.0.1/tcp/0"})
-	if err != nil {
-		_ = studio.Close()
-		return err
-	}
-	a.nodes[studio.Host.ID().String()] = studio
-	a.nodes[linux.Host.ID().String()] = linux
-	a.forceRelay[linux.Host.ID().String()] = true
-	if err := a.startDemoWebService(studio, "studio-preview", "Project preview", "Studio Workstation"); err != nil {
-		return err
-	}
-	if err := a.startDemoWebService(linux, "linux-status", "Linux status", "Linux Server"); err != nil {
-		return err
-	}
-	// Reserve the Linux node through Studio, then let the primary node connect only
-	// to the relay path. This makes the advertised relay edge a real transport hop.
-	studioInfo := peer.AddrInfo{ID: studio.Host.ID(), Addrs: studio.Host.Addrs()}
-	ctx, cancel := context.WithTimeout(a.ctx, 12*time.Second)
-	defer cancel()
-	if err := linux.Host.Connect(ctx, studioInfo); err != nil {
-		return fmt.Errorf("connect Linux demo peer to Studio relay: %w", err)
-	}
-	if _, err := client.Reserve(ctx, linux.Host, studioInfo); err != nil {
-		return fmt.Errorf("reserve Linux demo relay path: %w", err)
-	}
-	if err := a.main.Host.Connect(ctx, studioInfo); err != nil {
-		return fmt.Errorf("connect primary demo peer to Studio: %w", err)
-	}
-	relayAddresses := make([]ma.Multiaddr, 0, len(studio.Host.Addrs()))
-	for _, address := range studio.Host.Addrs() {
-		relayPart, _ := ma.NewMultiaddr("/p2p/" + studio.Host.ID().String() + "/p2p-circuit/p2p/" + linux.Host.ID().String())
-		relayAddresses = append(relayAddresses, address.Encapsulate(relayPart))
-	}
-	if len(relayAddresses) == 0 {
-		return fmt.Errorf("Studio relay did not advertise a listener")
-	}
-	a.main.Host.Peerstore().SetAddrs(linux.Host.ID(), relayAddresses, time.Hour*24)
-	a.mu.Lock()
-	a.relayInfos[linux.Host.ID().String()] = peer.AddrInfo{ID: linux.Host.ID(), Addrs: relayAddresses}
-	a.mu.Unlock()
-	if err := a.main.Host.Connect(ctx, peer.AddrInfo{ID: linux.Host.ID(), Addrs: relayAddresses}); err != nil {
-		return fmt.Errorf("connect Linux demo peer through Studio relay: %w", err)
-	}
-
-	if err := a.prepareDemoFolder(linux); err != nil {
-		return err
-	}
-	go a.renewDemoRelay(studio, linux)
-	if !a.connected {
-		// Refresh once while bootstrap connections are live so their current
-		// addresses are persisted for an explicit later resume.
-		a.refreshPeers()
-		for _, id := range primary.Host.Network().Peers() {
-			_ = primary.Host.Network().ClosePeer(id)
-		}
-		primary.SetEnabled(false)
-	}
-	a.refreshPeers()
-	return nil
-}
-
-func (a *App) renewDemoRelay(relayNode, target *Node) {
-	ticker := time.NewTicker(10 * time.Minute)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-a.ctx.Done():
-			return
-		case <-ticker.C:
-			ctx, cancel := context.WithTimeout(a.ctx, 12*time.Second)
-			relayInfo := peer.AddrInfo{ID: relayNode.Host.ID(), Addrs: relayNode.Host.Addrs()}
-			if target.Host.Network().Connectedness(relayNode.Host.ID()) == network.NotConnected {
-				_ = target.Host.Connect(ctx, relayInfo)
-			}
-			_, _ = client.Reserve(ctx, target.Host, relayInfo)
-			cancel()
-		}
-	}
-}
-
-func (a *App) startDemoWebService(node *Node, id, name, deviceName string) error {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return fmt.Errorf("start demo HTTP service: %w", err)
-	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	target := fmt.Sprintf("http://127.0.0.1:%d", port)
-	page := template.Must(template.New("demo-service").Parse(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{{.Name}} · Loom</title><style>
-:root{color-scheme:light;font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f5f5f7;color:#1d1d1f}
-*{box-sizing:border-box}body{margin:0;min-height:100vh;padding:24px;background:#f5f5f7}
-main{width:min(680px,100%);padding:32px;margin:8vh auto;border:1px solid #e5e5ea;border-radius:8px;background:#fff}
-.eyebrow{margin:0 0 18px;color:#0071e3;font-size:13px;font-weight:500}
-h1{margin:0 0 8px;font-size:clamp(27px,5vw,40px);letter-spacing:-.04em}.sub{margin:0;color:#6e6e73}.card{margin-top:24px;padding:18px 20px;border:1px solid #e5e5ea;border-radius:6px;background:#fff}.label{color:#6e6e73;font-size:12px}.value{margin-top:5px;overflow-wrap:anywhere;color:#1d1d1f;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px}
-</style></head><body><main><p class="eyebrow">Loom demo service</p><h1>{{.Name}}</h1><p class="sub">Served by {{.Peer}}</p><section class="card"><div class="label">Requested path</div><div class="value">{{.Path}}</div><div class="label" style="margin-top:18px">Response timestamp</div><div class="value">{{.Time}}</div></section></main></body></html>`))
-	httpServer := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-store")
-		_ = page.Execute(w, struct{ Name, Peer, Path, Time string }{Name: name, Peer: node.Name, Path: r.URL.Path, Time: time.Now().UTC().Format(time.RFC3339)})
-	})}
-	a.listeners = append(a.listeners, listener)
-	a.servers = append(a.servers, httpServer)
-	go func() { _ = httpServer.Serve(listener) }()
-	record := ServiceRecord{ID: id, Name: name, Target: target}
-	node.SetService(record)
-	if node == a.main {
-		a.services[id] = record
-	}
-	_ = deviceName
-	return nil
-}
-
-func (a *App) prepareDemoFolder(target *Node) error {
-	source := filepath.Join(a.dataDir, "demo-source")
-	if err := os.MkdirAll(source, 0700); err != nil {
-		return err
-	}
-	fixtures := map[string]string{
-		"welcome.txt":      "Loom demo folder sync: this file was copied over an encrypted libp2p stream.\n",
-		"tokens.css":       ":root { --loom-blue: #0071e3; --loom-ink: #1d1d1f; }\n",
-		"notes/design.txt": "Shared workspace sample assets. Change these files to see real folder transfer.\n",
-	}
-	for name, contents := range fixtures {
-		file := filepath.Join(source, filepath.FromSlash(name))
-		if _, err := os.Stat(file); errors.Is(err, os.ErrNotExist) {
-			if err := os.MkdirAll(filepath.Dir(file), 0700); err != nil {
-				return err
-			}
-			if err := os.WriteFile(file, []byte(contents), 0600); err != nil {
-				return err
-			}
-		}
-	}
-	folderID := "demo-shared-assets"
-	if !isID(folderID) {
-		return fmt.Errorf("invalid demo folder identifier")
-	}
-	folder := Folder{ID: folderID, Name: "Shared demo assets", Path: source, PeerID: target.Host.ID().String(), PeerName: target.Name, Status: "pending", Progress: 0}
-	a.mu.Lock()
-	entry := a.folders[folderID]
-	if entry == nil {
-		entry = &folderEntry{Folder: folder, manifest: make(map[string]string)}
-		a.folders[folderID] = entry
-	}
-	shouldSync := a.connected && !entry.Folder.Paused
-	if entry.Folder.Paused {
-		entry.Folder.Status = "paused"
-		entry.Folder.Error = ""
-	} else if !a.connected {
-		entry.Folder.Status = "offline"
-		entry.Folder.Error = "network is paused"
-	}
-	_ = a.persistLocked()
-	a.mu.Unlock()
-	if shouldSync {
-		if err := a.syncFolder(context.Background(), folderID); err != nil {
-			return fmt.Errorf("initial demo folder sync: %w", err)
-		}
 	}
 	return nil
 }

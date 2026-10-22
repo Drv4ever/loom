@@ -2,7 +2,6 @@ export type Network = {
   id: string
   name: string
   connected: boolean
-  demo: boolean
   peerId: string
   addresses: string[]
   version: string

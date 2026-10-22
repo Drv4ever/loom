@@ -8,7 +8,6 @@ type NetworkState struct {
 	ID        string   `json:"id"`
 	Name      string   `json:"name"`
 	Connected bool     `json:"connected"`
-	Demo      bool     `json:"demo"`
 	PeerID    string   `json:"peerId"`
 	Addresses []string `json:"addresses"`
 	Version   string   `json:"version"`

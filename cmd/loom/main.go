@@ -59,7 +59,7 @@ func main() {
 		}
 	}
 
-	// 3. Backward-compatible default: if args start with '-' (e.g. --demo, --name) or no args given, run daemon
+	// 3. Backward-compatible default: if args start with '-' (e.g. --name) or no args given, run daemon
 	runDaemon(filteredArgs)
 }
 
@@ -69,8 +69,7 @@ func runDaemon(args []string) {
 	var relayAddrs string
 
 	fs := flag.NewFlagSet("loom", flag.ExitOnError)
-	fs.BoolVar(&config.Demo, "demo", false, "start three real local demo peers, a relay, HTTP services, and sample folders")
-	fs.StringVar(&config.Name, "name", "", "device name (normal mode)")
+	fs.StringVar(&config.Name, "name", "", "device name")
 	fs.StringVar(&config.Listen, "listen", "127.0.0.1:8787", "loopback HTTP API address")
 	fs.StringVar(&config.DataDir, "data-dir", ".loom", "directory for identity, network key, state, and received files")
 	fs.StringVar(&config.NetworkKey, "network-key", "", "64-character hex private-network key (created and persisted when omitted)")

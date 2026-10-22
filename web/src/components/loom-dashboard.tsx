@@ -269,11 +269,6 @@ export function LoomDashboard() {
             <div>
               <h1>{pageTitles[page]}</h1>
             </div>
-            {state.network.demo && (
-              <span className="page-demo-mark">
-                <i /> Local demo
-              </span>
-            )}
             <div className="heading-actions">
               {page === "devices" || page === "overview" ? (
                 <Button
@@ -354,13 +349,6 @@ export function LoomDashboard() {
               onService={() => openDialog("service")}
               onFolder={() => openDialog("folder")}
               onReviewConflicts={(folder) => setConflictFolder(folder)}
-              onDemo={() =>
-                void runAction(
-                  "demo",
-                  () => postJson("/api/demo/change", {}),
-                  "Sample change synced"
-                )
-              }
               onPage={navigateTo}
               onSync={(folder) =>
                 void runAction(
@@ -808,7 +796,6 @@ function Overview({
   onDevice,
   onService,
   onFolder,
-  onDemo,
   onPage,
   onSync,
   onReviewConflicts,
@@ -818,7 +805,6 @@ function Overview({
   onDevice: () => void
   onService: () => void
   onFolder: () => void
-  onDemo: () => void
   onPage: (page: PageKey) => void
   onSync: (folder: SharedFolder) => void
   onReviewConflicts?: (folder: SharedFolder) => void
@@ -919,22 +905,6 @@ function Overview({
                 <DeviceRow key={device.id} device={device} compact />
               ))}
             </div>
-          )}
-          {state.network.demo && (
-            <button
-              className="demo-change"
-              onClick={onDemo}
-              disabled={busyKey === "demo"}
-            >
-              <span className="demo-change-icon">
-                <Zap size={15} />
-              </span>
-              <span>
-                <strong>Change sample file</strong>
-                {busyKey === "demo" && <small>Writing and syncing…</small>}
-              </span>
-              <ArrowUpRight size={14} />
-            </button>
           )}
         </section>
       </div>

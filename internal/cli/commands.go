@@ -164,9 +164,6 @@ func (r *Runner) RunStatus(ctx context.Context, args []string) error {
 	fmt.Fprintf(r.Out, "  Status:       %s\n", StatusDot(state.Network.Connected, netStatus))
 	fmt.Fprintf(r.Out, "  Peer ID:      %s\n", state.Network.PeerID)
 	fmt.Fprintf(r.Out, "  Version:      %s\n", state.Network.Version)
-	if state.Network.Demo {
-		fmt.Fprintf(r.Out, "  Mode:         %s\n", Colorize(colorYellow, "Local Demo"))
-	}
 	if len(state.Network.Addresses) > 0 {
 		fmt.Fprintf(r.Out, "  Addresses:    %s\n", state.Network.Addresses[0])
 		for _, addr := range state.Network.Addresses[1:] {

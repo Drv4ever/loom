@@ -10,9 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"path"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -57,7 +55,6 @@ func (a *App) Handler(apiListen string) http.Handler {
 	mux.HandleFunc("DELETE /api/relays/{id}", a.handleDeleteRelay)
 	mux.HandleFunc("DELETE /api/relays", a.handleDeleteRelay)
 	mux.HandleFunc("POST /api/network", a.handleNetwork)
-	mux.HandleFunc("POST /api/demo/change", a.handleDemoChange)
 	mux.HandleFunc("GET /api/diagnostics", a.handleDiagnostics)
 	mux.HandleFunc("/proxy/", a.handleProxy)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -426,70 +423,13 @@ func (a *App) handleNetwork(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, state.Network)
 }
 
-func (a *App) handleDemoChange(w http.ResponseWriter, r *http.Request) {
-	if !a.demo {
-		http.NotFound(w, nil)
-		return
-	}
-	var folderID, source string
-	a.mu.RLock()
-	for id, entry := range a.folders {
-		if entry.Folder.ID == "demo-shared-assets" {
-			folderID = id
-			source = entry.Folder.Path
-			break
-		}
-	}
-	a.mu.RUnlock()
-	if folderID == "" {
-		writeError(w, http.StatusInternalServerError, "demo folder is unavailable")
-		return
-	}
-	if err := a.requireConnectedAndUnpaused(folderID); err != nil {
-		writeMutationError(w, err)
-		return
-	}
-	id, err := randomSuffix()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not create sample file")
-		return
-	}
-	name := "change-" + time.Now().UTC().Format("20060102T150405") + "-" + id + ".txt"
-	content := fmt.Sprintf("A real Loom demo transfer created at %s.\nThis sample was sent over an encrypted libp2p stream through the Studio relay.\n", time.Now().UTC().Format(time.RFC3339Nano))
-	if err := os.WriteFile(filepath.Join(source, name), []byte(content), 0600); err != nil {
-		writeError(w, http.StatusInternalServerError, "could not write demo source file")
-		return
-	}
-	if err := a.syncFolder(r.Context(), folderID); err != nil {
-		writeMutationError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
-}
-
-func (a *App) requireConnectedAndUnpaused(folderID string) error {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	entry := a.folders[folderID]
-	if entry == nil {
-		return errors.New("demo folder is unavailable")
-	}
-	if !a.connected {
-		return errNetworkPaused
-	}
-	if entry.Folder.Paused {
-		return errFolderPaused
-	}
-	return nil
-}
-
 func (a *App) handleDiagnostics(w http.ResponseWriter, _ *http.Request) {
 	state := a.State()
 	diagnostics := map[string]any{
 		"ok":             true,
 		"version":        Version,
 		"uptimeSeconds":  int64(time.Since(a.started).Seconds()),
-		"network":        map[string]any{"connected": state.Network.Connected, "peerId": state.Network.PeerID, "addresses": state.Network.Addresses, "private": true, "demo": a.demo},
+		"network":        map[string]any{"connected": state.Network.Connected, "peerId": state.Network.PeerID, "addresses": state.Network.Addresses, "private": true},
 		"devices":        state.Devices,
 		"folderStatuses": folderDiagnostic(state.Folders),
 		"limits":         map[string]int64{"fileBytes": maxFileSize, "proxyRequestBytes": maxProxyBody, "proxyResponseBytes": maxProxyReply},

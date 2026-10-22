@@ -3,20 +3,10 @@
 *.key
 .tools/
 
-*.key
 bin/
-
-*.key
 artifacts/
-
-*.key
 *.log
-
-*.key
 .DS_Store
-
-*.key
 __pycache__/
-
-*.key
 *.py[cod]
+*.exe
