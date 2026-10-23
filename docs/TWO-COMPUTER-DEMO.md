@@ -1,95 +1,69 @@
-# Demo Loom on two computers on the same Wi-Fi
+# Two-computer faculty demo
 
-This runs one real Loom device on each computer. Files travel over the LAN through an encrypted peer connection. Use normal mode for this demo; `make demo` creates three fixture nodes on one computer.
+Use exactly two physical computers, one real Loom node on each. The presentation story is: **an app and files on B become accessible from A**. Prepare the shared key and rehearse discovery before presenting.
 
-## 1. Prepare both computers
+## Prepare both devices
 
-Use the same checkout/version of this repository on both computers. Install Go 1.27+, Bun, and Python 3, then run this once in each checkout:
+Use the same checkout and install Go 1.27+, Bun, and Python 3. Run `cd web && bun install` once on each computer. Join the same Wi-Fi or wired LAN; guest networks may isolate clients.
 
-```sh
-cd web
-bun install
-cd ..
-```
-
-These commands use a macOS/Linux shell. Join both computers to the same Wi-Fi or wired LAN. Guest Wi-Fi with client isolation can block communication even when the Wi-Fi name matches.
-
-## 2. Create one shared network key
-
-On **computer A only**, create a private key file:
+Generate the shared key on **A only**:
 
 ```sh
 umask 077
 openssl rand -hex 32 > "$HOME/.loom-demo-network.key"
 ```
 
-Copy this file privately to computer B as `$HOME/.loom-demo-network.key`. Both files must contain the same key. On B, run `chmod 600 "$HOME/.loom-demo-network.key"`. Do not generate a second key on B or copy A's entire data directory: each computer needs its own identity.
+Copy that file privately to B at the same path. On B, run `chmod 600 "$HOME/.loom-demo-network.key"`. Do not generate a separate key or copy A's data directory: the devices need different identities.
 
-## 3. Start Loom on each computer
-
-From the repository root on **A**:
+From the repository root on A:
 
 ```sh
-LOOM_DATA_DIR="$HOME/.loom-two-computer" ./scripts/run.sh \
-  --name "Laptop A" \
+./scripts/demo.sh --name "Laptop A" \
   --network-key-file "$HOME/.loom-demo-network.key"
 ```
 
-On **B**:
+Run the same command on B with `--name "Laptop B"`. Open [the dashboard](http://127.0.0.1:3000) locally on both. State persists in `$HOME/.loom-two-computer`. To use another directory, prefix the command with `LOOM_DATA_DIR=/absolute/path`.
+
+Allow local-network access when asked by the operating system. Peer traffic uses TCP 4001 and mDNS uses UDP 5353. The API (8787) and dashboard (3000) stay on loopback.
+
+If mDNS does not discover B, copy B's address containing its LAN IP from **Devices** or **Settings → Connection details**, then paste it into A's **Connect device** dialog. An address containing `127.0.0.1` cannot reach the other computer. Both devices must show the same network ID and different peer IDs.
+
+If the stored and supplied keys differ, use that directory's original key or choose a fresh data directory. Preserve any received files you need. If a dashboard port is busy, stop the previous launcher before starting another.
+
+## Three-minute presentation
+
+1. **Connect (20 seconds).** Show A and B appearing online. Explain that each dashboard controls its own computer.
+2. **Access an app (60 seconds).** On B, publish a useful local HTTP app in Services, with access granted to A. On A, open that service. Keep B's app visible so the audience sees where it runs.
+3. **Share files (60 seconds).** On B, add a small folder, select A, and choose Two way or Send only. On A, accept the invitation under Incoming shares and show its destination. Edit a file on B and show the update arriving on A. Keep Activity visible as evidence.
+4. **Recovery, if time allows (40 seconds).** Stop B's launcher with Ctrl-C. A retains its service with Device offline. Restart B with the same command and show reconnection and availability.
+
+For a simple local web app on B, create a tiny project status page:
 
 ```sh
-LOOM_DATA_DIR="$HOME/.loom-two-computer" ./scripts/run.sh \
-  --name "Laptop B" \
-  --network-key-file "$HOME/.loom-demo-network.key"
+mkdir -p "$HOME/Loom Demo App"
+printf '<h1>Project preview on Laptop B</h1><p>Accessed privately through Loom.</p>\n' > "$HOME/Loom Demo App/index.html"
+python3 -m http.server 8080 --bind 127.0.0.1 --directory "$HOME/Loom Demo App"
 ```
 
-The launcher builds the backend, starts the local dashboard, waits for both to be ready, and stops both on Ctrl-C. Open [http://127.0.0.1:3000](http://127.0.0.1:3000) **on each computer**. The browser talks to its own computer's backend.
+Publish `http://127.0.0.1:8080` on B. Stop the Python server with Ctrl-C after the presentation.
 
-Allow Loom to access the local network when the operating system asks. The real-device launcher uses **TCP port 4001** for peer traffic; LAN discovery uses mDNS (UDP 5353). The dashboard (3000) and API (8787) stay on loopback and do not need to be exposed to the LAN. To change the peer port, append `--peer-listen /ip4/0.0.0.0/tcp/4002`.
-
-In **Devices**, each dashboard should show the other computer online within a few seconds. In **Settings**, both should show the same network identity; their connection addresses end with different peer IDs.
-
-If discovery does not work, open B's **Settings → Connection details**, copy the address containing B's LAN IP (for example `/ip4/192.168.1.24/tcp/4001/p2p/...`), and paste it into A's **Add device** dialog. Do not use an address containing `127.0.0.1`. A manual connection is enough; both computers can then send folders. If that also fails, check TCP 4001, local-network permissions, and Wi-Fi client isolation.
-
-## 4. Show a real file appearing on B
-
-On **A**, create a source folder:
+For the folder demonstration on B:
 
 ```sh
-mkdir -p "$HOME/Loom Demo A"
-printf 'Hello from Laptop A!\n' > "$HOME/Loom Demo A/hello.txt"
+mkdir -p "$HOME/Loom Demo Files"
+printf 'Hello from Laptop B!\n' > "$HOME/Loom Demo Files/hello.txt"
 ```
 
-In A's dashboard, open **Folders → Add folder**:
-
-- Name: `Demo from A`
-- Full path: the absolute path to `Loom Demo A` (for example `/Users/ayush/Loom Demo A`). Enter the expanded path, not `$HOME` or `~`.
-- Device: `Laptop B`
-
-Within a few seconds, A's **Sending folders** table should show **Synced**. B's **Received folders** table shows `Demo from A`, its local disk path, and the file list. Expand the file count and click `hello.txt` to download it, or use **Copy path** to open the folder in Finder / your file manager. The managed destination is `$HOME/.loom-two-computer/received/<folder-id>/hello.txt` on B.
-
-While showing B's screen, edit the source on A:
+Enter the expanded absolute path in B's folder dialog, select Laptop A, and accept it on A. The suggested destination is `$HOME/.loom-two-computer/received/<folder-id>`. A may instead choose an existing empty directory. Then edit on B:
 
 ```sh
-printf 'Edited live on Laptop A!\n' >> "$HOME/Loom Demo A/hello.txt"
-mkdir -p "$HOME/Loom Demo A/nested"
-printf 'A second file.\n' > "$HOME/Loom Demo A/nested/another.txt"
+printf 'Edited live on Laptop B!\n' >> "$HOME/Loom Demo Files/hello.txt"
 ```
 
-Loom scans every two seconds and sends new or changed files automatically. Refresh or reopen the file on B to show the new contents. No **Sync now** click is needed, though that button can trigger a scan immediately.
+The update should arrive after the next scan, normally within a few seconds. Open or refresh the received file to show its content. In Two way mode, an edit at A's accepted destination also travels back; keep the short live presentation to the rehearsed B-to-A edit.
 
-## 5. Send a reply and show reconnection
+## Features to rehearse separately
 
-On B, create a **different source folder** (`$HOME/Loom Demo B`) with `reply.txt`. Add it in B's **Folders**, selecting `Laptop A`. A now shows that folder under **Received folders**. Both computers can send and receive at the same time.
+Conflict resolution, propagated deletions and recovery, send-only behavior, TCP service forwarding, and relays have their own controls and regression coverage. The short faculty presentation does not need to exercise every feature. PIN enrollment is disabled; use the shared key and direct connection workflow above.
 
-For a reconnection demo, stop B with Ctrl-C, edit a source file on A, then rerun B's startup command. Its peer identity and received-folder list persist. Once the connection returns, A automatically sends its pending changes. Keep the same data directory and network key across restarts.
-
-## Current sync behavior
-
-Each registered folder is **one-way**, from its selected source to the other computer's managed destination. Changes made inside a received folder do not travel back to the source. To demonstrate both directions, use the separate source folders described above. Shared-folder editing with conflict resolution is not implemented.
-
-Source deletions are not propagated; copies stay on the receiver. Empty directories and symlinks are skipped. Files are limited to 100 MiB each, with a 1 GiB source-folder limit per scan. Older destination contents are backed up under the receiver's `node/history/<folder-id>/` when a changed file arrives. Stop tracking a source folder to stop sending it; this does not delete its received copies.
-
-If startup says the provided key differs from the stored key, that data directory belongs to another network. Reuse its original key or choose a new `LOOM_DATA_DIR`. Do not delete a data directory containing files you need. If ports 3000 or 8787 are busy, stop the old Loom demo before starting this one.
-
-For a repeatable rehearsal on one computer, run `make test-peers`. It starts two independent normal-mode processes with separate identities and checks discovery, automatic file transfer, receiver downloads, separate folders in both directions, and persistence across restarts. It does not replace testing the actual two computers' Wi-Fi and firewall setup before presenting.
+`make test-peers` rehearses two independent real processes, a local HTTP service, explicit folder acceptance with a custom destination, edits and deletions from the receiver, and persistence through restarts. Rehearse the actual laptops too, since a process test cannot validate their Wi-Fi and firewall settings.

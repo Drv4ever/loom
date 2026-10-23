@@ -60,9 +60,10 @@ func TestGenericTCPPortForwarding(t *testing.T) {
 	serviceID := "echo-service"
 	nodeB.mu.Lock()
 	nodeB.services[serviceID] = ServiceRecord{
-		ID:     serviceID,
-		Name:   "Echo Service",
-		Target: fmt.Sprintf("127.0.0.1:%d", echoPort),
+		Protocol: "tcp",
+		ID:       serviceID,
+		Name:     "Echo Service",
+		Target:   fmt.Sprintf("127.0.0.1:%d", echoPort),
 	}
 	nodeB.mu.Unlock()
 
@@ -127,6 +128,15 @@ func TestGenericTCPPortForwarding(t *testing.T) {
 		t.Fatalf("stop forward: %v", err)
 	}
 
+	// Existing client sessions must close as well as the listening port.
+	_ = clientConn.SetReadDeadline(time.Now().Add(time.Second))
+	_, activeErr := clientConn.Read(make([]byte, 1))
+	if activeErr == nil {
+		t.Fatal("stopped forward kept an active session open")
+	}
+	if timeout, ok := activeErr.(net.Error); ok && timeout.Timeout() {
+		t.Fatal("active session did not close when forward stopped")
+	}
 	// Verify listener is closed
 	time.Sleep(50 * time.Millisecond)
 	_, dialErr := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", fwd.LocalPort), 100*time.Millisecond)

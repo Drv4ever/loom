@@ -47,16 +47,17 @@ const (
 )
 
 type NodeOptions struct {
-	Name          string
-	Platform      string
-	DataDir       string
-	IdentityPath  string
-	ReceiveDir    string
-	NetworkKey    []byte
-	ListenAddress string
-	RelayService  bool
-	AllowLoopback bool
-	IsBlocked     func(peer.ID) bool
+	RequireAcceptance bool
+	Name              string
+	Platform          string
+	DataDir           string
+	IdentityPath      string
+	ReceiveDir        string
+	NetworkKey        []byte
+	ListenAddress     string
+	RelayService      bool
+	AllowLoopback     bool
+	IsBlocked         func(peer.ID) bool
 }
 
 type Node struct {
@@ -77,9 +78,11 @@ type Node struct {
 
 	trash             *TrashManager
 	conflicts         *ConflictStore
-	tombstones        map[string]map[string]time.Time
+	activeSync        map[string]network.Stream
+	requireAcceptance bool
 	getCustomPath     func(folderID string) string
 	checkFolderAccess func(folderID, peerID string, isWrite bool) error
+	onFolderSynced    func(ReceivedFolder, int64, int)
 }
 
 type nodeGater struct {
@@ -190,9 +193,9 @@ func NewNode(opts NodeOptions) (*Node, error) {
 		Host: h, Name: opts.Name, Platform: opts.Platform, ReceiveDir: opts.ReceiveDir,
 		HistoryDir: filepath.Join(opts.DataDir, "history"), services: make(map[string]ServiceRecord), enabled: &enabled,
 		received: make(map[string]ReceivedFolder), receivedPath: filepath.Join(opts.DataDir, "received.json"),
-		trash:      NewTrashManager(filepath.Join(opts.DataDir, "trash"), 30*24*time.Hour),
-		conflicts:  NewConflictStore(),
-		tombstones: make(map[string]map[string]time.Time),
+		trash:             NewTrashManager(filepath.Join(opts.DataDir, "trash"), 30*24*time.Hour),
+		conflicts:         NewConflictStore(),
+		requireAcceptance: opts.RequireAcceptance, activeSync: make(map[string]network.Stream),
 	}
 	if err := n.loadReceived(); err != nil {
 		_ = h.Close()
@@ -388,7 +391,7 @@ func (n *Node) handleHTTP(stream network.Stream) {
 	n.mu.RLock()
 	service, ok := n.services[serviceID]
 	n.mu.RUnlock()
-	if !ok {
+	if !ok || serviceProtocol(service) != "http" {
 		writeSimpleHTTPError(stream, http.StatusNotFound, "service is not published")
 		return
 	}
@@ -602,6 +605,11 @@ func (n *Node) TransferFile(ctx context.Context, id peer.ID, folderID string, de
 }
 
 func (n *Node) handleFolder(stream network.Stream) {
+	if n.requireAcceptance {
+		defer stream.Close()
+		_ = writeFrame(stream, mustJSON(map[string]any{"ok": false, "error": "upgrade peer to the consent-based sync protocol"}))
+		return
+	}
 	defer stream.Close()
 	_ = stream.SetDeadline(time.Now().Add(90 * time.Second))
 	if !n.enabled.Load() {

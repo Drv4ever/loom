@@ -36,10 +36,11 @@ type Config struct {
 }
 
 type folderEntry struct {
-	Folder   Folder
-	cancel   context.CancelFunc
-	syncing  bool
-	manifest map[string]string
+	Folder     Folder
+	cancel     context.CancelFunc
+	syncing    bool
+	tombstones map[string]time.Time
+	manifest   map[string]string
 }
 
 type peerEntry struct {
@@ -49,9 +50,10 @@ type peerEntry struct {
 }
 
 type persistedFolder struct {
-	Folder    Folder            `json:"folder"`
-	Manifest  map[string]string `json:"manifest"`
-	Conflicts []Conflict        `json:"conflicts,omitempty"`
+	Folder     Folder               `json:"folder"`
+	Manifest   map[string]string    `json:"manifest"`
+	Tombstones map[string]time.Time `json:"tombstones,omitempty"`
+	Conflicts  []Conflict           `json:"conflicts,omitempty"`
 }
 
 type persistedState struct {
@@ -61,6 +63,7 @@ type persistedState struct {
 	Folders          []persistedFolder `json:"folders"`
 	TransferredBytes int64             `json:"transferredBytes"`
 	Activity         []Activity        `json:"activity"`
+	PeerDetails      []peerEntry       `json:"peerDetails,omitempty"`
 	Peers            []peer.AddrInfo   `json:"peers"`
 	Relays           []string          `json:"relays,omitempty"`
 	BlockedPeers     []string          `json:"blockedPeers,omitempty"`
@@ -109,6 +112,10 @@ func New(ctx context.Context, config Config) (*App, error) {
 	if err := os.Chmod(dataDir, 0700); err != nil {
 		return nil, fmt.Errorf("secure data directory: %w", err)
 	}
+	dataDir, err = filepath.EvalSymlinks(dataDir)
+	if err != nil {
+		return nil, err
+	}
 	key, err := loadNetworkKey(filepath.Join(dataDir, "network.key"), config.NetworkKey)
 	if err != nil {
 		return nil, err
@@ -134,8 +141,8 @@ func New(ctx context.Context, config Config) (*App, error) {
 	mainDir := filepath.Join(dataDir, "node")
 	node, err := NewNode(NodeOptions{
 		Name: deviceName(config.Name), Platform: runtime.GOOS, DataDir: mainDir,
-		IdentityPath: filepath.Join(dataDir, "identity.key"),
-		ReceiveDir:   filepath.Join(dataDir, "received"), NetworkKey: key, ListenAddress: config.PeerListen, RelayService: config.Relay,
+		IdentityPath:      filepath.Join(dataDir, "identity.key"),
+		RequireAcceptance: true, ReceiveDir: filepath.Join(dataDir, "received"), NetworkKey: key, ListenAddress: config.PeerListen, RelayService: config.Relay,
 		IsBlocked: func(p peer.ID) bool {
 			return a.IsPeerBlocked(p.String())
 		},
@@ -144,6 +151,16 @@ func New(ctx context.Context, config Config) (*App, error) {
 		return nil, err
 	}
 	a.main = node
+	node.onFolderSynced = func(folder ReceivedFolder, transferred int64, changes int) {
+		if changes == 0 {
+			return
+		}
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		a.transferredBytes += transferred
+		a.addActivityLocked("sync", "Shared folder updated", fmt.Sprintf("%s: processed %d change(s) from %s.", folder.Name, changes, folder.PeerName))
+		_ = a.persistLocked()
+	}
 	node.getCustomPath = func(folderID string) string {
 		a.mu.RLock()
 		defer a.mu.RUnlock()
@@ -252,7 +269,7 @@ func (a *App) loadPersisted() {
 	a.activities = saved.Activity
 	a.transferredBytes = saved.TransferredBytes
 	for _, service := range saved.Services {
-		if _, err := validateLoopbackHTTPURL(service.Target); err != nil || service.ID == "" || service.Name == "" {
+		if err := validateService(service); err != nil || service.ID == "" || service.Name == "" {
 			continue
 		}
 		a.services[service.ID] = service
@@ -260,7 +277,7 @@ func (a *App) loadPersisted() {
 	}
 	for _, savedFolder := range saved.Folders {
 		folder := savedFolder.Folder
-		if folder.ID == "" || folder.Path == "" || folder.PeerID == "" {
+		if !isID(folder.ID) || !filepath.IsAbs(folder.Path) || folder.PeerID == "" {
 			continue
 		}
 		if _, err := os.Stat(folder.Path); err != nil {
@@ -273,12 +290,27 @@ func (a *App) loadPersisted() {
 			folder.Status = "pending"
 		}
 		if a.main != nil && a.main.conflicts != nil {
+			root, _ := os.OpenRoot(folder.Path)
 			for _, c := range savedFolder.Conflicts {
+				if c.FolderID != folder.ID || !validRelativePath(c.Path) || !validRelativePath(c.ConflictPath) {
+					continue
+				}
+				if root != nil {
+					if c.LocalSHA256 == "" {
+						c.LocalSHA256, _ = syncFileHash(root, c.Path)
+					}
+					if c.RemoteSHA256 == "" {
+						c.RemoteSHA256, _ = syncFileHash(root, c.ConflictPath)
+					}
+				}
 				a.main.conflicts.Add(c)
+			}
+			if root != nil {
+				_ = root.Close()
 			}
 			folder.Conflicts = len(savedFolder.Conflicts)
 		}
-		a.folders[folder.ID] = &folderEntry{Folder: folder, manifest: savedFolder.Manifest}
+		a.folders[folder.ID] = &folderEntry{Folder: folder, manifest: savedFolder.Manifest, tombstones: savedFolder.Tombstones}
 	}
 	for _, info := range saved.Peers {
 		if info.ID == "" || info.ID == a.main.Host.ID() {
@@ -288,6 +320,13 @@ func (a *App) loadPersisted() {
 		if len(info.Addrs) > 0 {
 			a.peers[info.ID.String()] = &peerEntry{Info: info, Device: Device{ID: info.ID.String(), Name: "Device " + shortID(info.ID.String()), Platform: "unknown", Connection: "direct"}}
 		}
+	}
+	for _, entry := range saved.PeerDetails {
+		if entry.Info.ID == "" || entry.Info.ID == a.main.Host.ID() {
+			continue
+		}
+		entry.Device.Online = false
+		a.peers[entry.Info.ID.String()] = &entry
 	}
 	for _, r := range saved.Relays {
 		r = strings.TrimSpace(r)
@@ -330,11 +369,12 @@ func (a *App) persistLocked() error {
 		if a.main != nil && a.main.conflicts != nil {
 			conflicts = a.main.conflicts.List(entry.Folder.ID)
 		}
-		saved.Folders = append(saved.Folders, persistedFolder{Folder: entry.Folder, Manifest: entry.manifest, Conflicts: conflicts})
+		saved.Folders = append(saved.Folders, persistedFolder{Folder: entry.Folder, Manifest: entry.manifest, Tombstones: entry.tombstones, Conflicts: conflicts})
 	}
 	for _, entry := range a.peers {
 		if entry.Info.ID != "" && len(entry.Info.Addrs) != 0 {
 			saved.Peers = append(saved.Peers, entry.Info)
+			saved.PeerDetails = append(saved.PeerDetails, *entry)
 		}
 	}
 	data, err := json.MarshalIndent(saved, "", "  ")
@@ -368,6 +408,7 @@ func (a *App) refreshLoop() {
 		case <-a.ctx.Done():
 			return
 		case <-ticker.C:
+			a.refreshServiceHealth()
 			a.refreshPeers()
 		}
 	}
@@ -441,7 +482,9 @@ func (a *App) refreshPeers() {
 		entry.Device.Address = addr.String()
 		entry.Device.LastSeen = time.Now().UTC()
 		entry.Info = info
-		entry.Services = summary.Services
+		if summary.Name != "" {
+			entry.Services = summary.Services
+		}
 		entry.Device.LatencyMs = 0
 		if len(info.Addrs) != 0 && !forceRelay {
 			a.main.Host.Peerstore().AddAddrs(id, info.Addrs, time.Hour*24)
@@ -458,7 +501,6 @@ func (a *App) refreshPeers() {
 		if !active[id] && entry.Device.Online {
 			entry.Device.Online = false
 			entry.Device.LastSeen = time.Now().UTC()
-			entry.Services = nil
 			a.updateFoldersForPeerLocked(id, false)
 			a.addActivityLocked("device", "Device disconnected", entry.Device.Name+" left the private network.")
 		}
@@ -586,10 +628,12 @@ func (a *App) State() State {
 		services = append(services, a.serviceView(a.main, record))
 	}
 	for peerID, entry := range a.peers {
-		if !entry.Device.Online {
-			continue
-		}
 		for _, record := range entry.Services {
+			if !entry.Device.Online {
+				record.Status = "device_offline"
+			} else if len(record.AllowedPeers) > 0 && !containsPeer(record.AllowedPeers, a.main.Host.ID().String()) {
+				record.Status = "access_denied"
+			}
 			node := a.nodes[peerID]
 			services = append(services, a.serviceViewWithID(node, peerID, entry.Device.Name, record))
 		}
@@ -636,6 +680,11 @@ func (a *App) State() State {
 	if a.main != nil {
 		received = a.main.ReceivedFolders()
 	}
+	for _, folder := range received {
+		if folder.Status == "accepted" {
+			stats.SyncedFiles += len(folder.Files)
+		}
+	}
 	for i := range received {
 		for _, device := range devices {
 			if device.ID == received[i].PeerID {
@@ -671,17 +720,16 @@ func (a *App) serviceView(node *Node, record ServiceRecord) Service {
 }
 
 func (a *App) serviceViewWithID(node *Node, peerID, peerName string, record ServiceRecord) Service {
-	target, _ := validateLoopbackHTTPURL(record.Target)
-	port := 0
-	if target != nil {
-		port, _ = net.LookupPort("tcp", target.Port())
+	status := record.Status
+	if status == "" {
+		status = "checking"
 	}
-	return Service{
-		ID: record.ID, Name: record.Name, DeviceID: peerID, DeviceName: peerName,
-		Protocol: "http", Target: record.Target, Port: port, Status: "published",
-		URL: "/proxy/" + peerID + "/" + record.ID + "/", Trusted: record.Trusted,
-		AllowedPeers: record.AllowedPeers,
+	protocol := serviceProtocol(record)
+	url := ""
+	if protocol == "http" {
+		url = "/proxy/" + peerID + "/" + record.ID + "/"
 	}
+	return Service{ID: record.ID, Name: record.Name, DeviceID: peerID, DeviceName: peerName, Protocol: protocol, Target: record.Target, Port: servicePort(record), Status: status, URL: url, Trusted: record.Trusted, AllowedPeers: append([]string(nil), record.AllowedPeers...)}
 }
 
 func firstAddress(addresses []string) string {
@@ -975,6 +1023,15 @@ func (a *App) checkFolderAccess(folderID, peerID string, isWrite bool) error {
 	if !ok {
 		return nil
 	}
+	if entry.Folder.Paused {
+		return errFolderPaused
+	}
+	if entry.syncing {
+		return errFolderBusy
+	}
+	if entry.Folder.PeerID != "" && entry.Folder.PeerID != peerID {
+		return fmt.Errorf("folder belongs to a different peer")
+	}
 	if len(entry.Folder.AllowedPeers) > 0 {
 		allowed := false
 		for _, p := range entry.Folder.AllowedPeers {
@@ -994,145 +1051,14 @@ func (a *App) checkFolderAccess(folderID, peerID string, isWrite bool) error {
 }
 
 // GeneratePairingCode initiates a time-limited 6-digit PIN pairing session.
-func (a *App) GeneratePairingCode(duration time.Duration) (*PairingSession, error) {
-	if a.pairing == nil {
-		a.pairing = NewPairingManager()
-	}
-	if duration <= 0 {
-		duration = 10 * time.Minute
-	}
-	a.mu.RLock()
-	relays := append([]string(nil), a.relays...)
-	var peerID string
-	var peerAddrs []string
-	if a.main != nil {
-		peerID = a.main.Host.ID().String()
-		peerAddrs = a.main.Addrs()
-	}
-	netID := a.networkID
-	netName := a.name
-	netKey := a.networkKey
-	a.mu.RUnlock()
+var errPINPairingUnavailable = errors.New("PIN enrollment is unavailable; start both devices with the same --network-key-file, then connect using the device address")
 
-	session, err := a.pairing.CreateSessionWithOptions(netKey, netID, netName, peerID, relays, peerAddrs, duration)
-	if err != nil {
-		return nil, err
-	}
-
-	// Register with configured rendezvous relays in background
-	if a.main != nil && len(relays) > 0 {
-		go func(pin string, ttl time.Duration) {
-			topic, err := PairingTopic(pin)
-			if err != nil {
-				return
-			}
-			enc, err := EncryptPairingPayload(session.Payload, pin)
-			if err != nil {
-				return
-			}
-			dataStr := hex.EncodeToString(enc)
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			defer cancel()
-			for _, relayAddr := range relays {
-				addr, err := ma.NewMultiaddr(relayAddr)
-				if err != nil {
-					continue
-				}
-				info, err := peer.AddrInfoFromP2pAddr(addr)
-				if err != nil {
-					continue
-				}
-				if a.main.Host.Network().Connectedness(info.ID) != network.Connected {
-					_ = a.main.Host.Connect(ctx, *info)
-				}
-				_ = RegisterPeerWithData(ctx, a.main.Host, info.ID, topic, ttl, dataStr)
-			}
-		}(session.PIN, duration)
-	}
-
-	return session, nil
+func (a *App) GeneratePairingCode(time.Duration) (*PairingSession, error) {
+	return nil, errPINPairingUnavailable
 }
-
-// GetPairingSession returns the current active pairing session, or nil if none.
-func (a *App) GetPairingSession() *PairingSession {
-	if a.pairing == nil {
-		return nil
-	}
-	return a.pairing.CurrentSession()
-}
-
-// ClaimPairingCode redeems a 6-digit pairing PIN either locally or via circuit relays.
-func (a *App) ClaimPairingCode(pin string, relayAddr string) (*PairingPayload, error) {
-	cleaned, err := CleanPIN(pin)
-	if err != nil {
-		return nil, err
-	}
-
-	// 1. Check local session
-	if a.pairing != nil {
-		if payload, err := a.pairing.Claim(cleaned); err == nil && payload != nil {
-			return payload, nil
-		}
-	}
-
-	// 2. Discover via circuit relay
-	a.mu.RLock()
-	relays := append([]string(nil), a.relays...)
-	a.mu.RUnlock()
-	if relayAddr != "" {
-		relays = append([]string{relayAddr}, relays...)
-	}
-
-	if len(relays) == 0 {
-		return nil, fmt.Errorf("no relay configured to discover pairing session for PIN %s", FormatPIN(cleaned))
-	}
-	if a.main == nil {
-		return nil, fmt.Errorf("loom node not initialized")
-	}
-
-	topic, err := PairingTopic(cleaned)
-	if err != nil {
-		return nil, err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	for _, r := range relays {
-		addr, err := ma.NewMultiaddr(r)
-		if err != nil {
-			continue
-		}
-		info, err := peer.AddrInfoFromP2pAddr(addr)
-		if err != nil {
-			continue
-		}
-		if a.main.Host.Network().Connectedness(info.ID) != network.Connected {
-			_ = a.main.Host.Connect(ctx, *info)
-		}
-		entries, err := DiscoverPeersWithData(ctx, a.main.Host, info.ID, topic, 10)
-		if err != nil {
-			continue
-		}
-		for _, entry := range entries {
-			if entry.Data == "" {
-				continue
-			}
-			encBytes, err := hex.DecodeString(entry.Data)
-			if err != nil {
-				continue
-			}
-			payload, err := DecryptPairingPayload(encBytes, cleaned)
-			if err == nil && payload != nil {
-				a.mu.Lock()
-				a.addActivityLocked("pairing", "Device paired", fmt.Sprintf("Successfully paired with peer %s", shortID(payload.IssuedBy)))
-				_ = a.persistLocked()
-				a.mu.Unlock()
-				return payload, nil
-			}
-		}
-	}
-
-	return nil, fmt.Errorf("pairing session not found or invalid PIN")
+func (a *App) GetPairingSession() *PairingSession { return nil }
+func (a *App) ClaimPairingCode(string, string) (*PairingPayload, error) {
+	return nil, errPINPairingUnavailable
 }
 
 var _ = io.EOF

@@ -2,12 +2,9 @@ package loom
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -16,64 +13,61 @@ import (
 	"github.com/libp2p/go-libp2p/core/protocol"
 )
 
-const syncProtocol = protocol.ID("/loom/sync/2.0.0")
+// Version 3 requires receiver consent and validates every operation against the handshake.
+const syncProtocol = protocol.ID("/loom/sync/3.0.0")
+const maxSyncFiles = 10000
 
-// SyncHello is the opening handshake from the initiator.
+const modeTwoWay = "two_way"
+const modeSendOnly = "send_only"
+
 type SyncHello struct {
-	FolderID   string                    `json:"folderId"`
-	FolderName string                    `json:"folderName"`
-	SenderName string                    `json:"senderName"`
-	Manifest   map[string]fileDescriptor `json:"manifest"`
-	Tombstones map[string]time.Time      `json:"tombstones"`
-	Baseline   map[string]string         `json:"baseline"`
+	FolderID     string                    `json:"folderId"`
+	FolderName   string                    `json:"folderName"`
+	SenderName   string                    `json:"senderName"`
+	BlockedPaths []string                  `json:"blockedPaths,omitempty"`
+	Mode         string                    `json:"mode"`
+	Manifest     map[string]fileDescriptor `json:"manifest"`
+	Tombstones   map[string]time.Time      `json:"tombstones"`
+	Baseline     map[string]string         `json:"baseline"`
 }
-
-// SyncHelloReply is returned by the responder.
 type SyncHelloReply struct {
 	OK           bool                      `json:"ok"`
 	Error        string                    `json:"error,omitempty"`
+	Status       string                    `json:"status,omitempty"`
 	ReceiverName string                    `json:"receiverName"`
+	Destination  string                    `json:"destination"`
 	Manifest     map[string]fileDescriptor `json:"manifest"`
 	Tombstones   map[string]time.Time      `json:"tombstones"`
 }
-
-// SyncPlanItem specifies an operation for a specific file.
 type SyncPlanItem struct {
 	Path         string
-	Action       string // "send", "fetch", "conflict", "delete_local", "delete_remote"
+	Action       string
 	SenderDesc   fileDescriptor
 	ReceiverDesc fileDescriptor
 }
-
-// TransferHeader announces a file transfer within the sync stream.
 type TransferHeader struct {
-	Path        string    `json:"path"`
-	Size        int64     `json:"size"`
-	ModTime     time.Time `json:"modTime"`
-	SHA256      string    `json:"sha256"`
-	IsConflict  bool      `json:"isConflict"`
-	ConflictPath string   `json:"conflictPath,omitempty"`
-	IsDelta     bool      `json:"isDelta"`
-	End         bool      `json:"end"` // true when batch of transfers is complete
+	Path    string    `json:"path"`
+	Size    int64     `json:"size"`
+	ModTime time.Time `json:"modTime"`
+	SHA256  string    `json:"sha256"`
+	IsDelta bool      `json:"isDelta"`
+	End     bool      `json:"end"`
 }
-
-// TransferAck confirms receipt of a file or chunk batch.
 type TransferAck struct {
 	OK    bool   `json:"ok"`
 	Error string `json:"error,omitempty"`
 }
-
-// NeededChunksReply returns the list of chunks required for a delta sync.
 type NeededChunksReply struct {
 	Needed []int `json:"needed"`
 }
-
-// ChunkFrame transports one chunk of delta data.
 type ChunkFrame struct {
 	Index int   `json:"index"`
 	Size  int64 `json:"size"`
 	Last  bool  `json:"last"`
 }
+type syncResponseError struct{ status, message string }
+
+func (e *syncResponseError) Error() string { return e.message }
 
 // computeSyncPlan calculates what needs to be transferred or resolved.
 func computeSyncPlan(
@@ -107,7 +101,7 @@ func computeSyncPlan(
 
 		// Deletion handling
 		if !locDeleted.IsZero() && hasRem {
-			if remDesc.SHA256 == baseHash || baseHash == "" {
+			if remDesc.SHA256 == baseHash && baseHash != "" {
 				plan = append(plan, SyncPlanItem{Path: p, Action: "delete_remote", ReceiverDesc: remDesc})
 			} else {
 				plan = append(plan, SyncPlanItem{Path: p, Action: "fetch", ReceiverDesc: remDesc})
@@ -115,7 +109,7 @@ func computeSyncPlan(
 			continue
 		}
 		if !remDeleted.IsZero() && hasLoc {
-			if locDesc.SHA256 == baseHash || baseHash == "" {
+			if locDesc.SHA256 == baseHash && baseHash != "" {
 				plan = append(plan, SyncPlanItem{Path: p, Action: "delete_local", SenderDesc: locDesc})
 			} else {
 				plan = append(plan, SyncPlanItem{Path: p, Action: "send", SenderDesc: locDesc})
@@ -168,379 +162,66 @@ func computeSyncPlan(
 	return plan
 }
 
-// handleBidirectionalSync handles incoming /loom/sync/2.0.0 streams on the responder.
-func (n *Node) handleBidirectionalSync(stream network.Stream) {
-	defer stream.Close()
-	_ = stream.SetDeadline(time.Now().Add(5 * time.Minute))
-
-	if !n.enabled.Load() {
-		_ = writeFrame(stream, mustJSON(SyncHelloReply{OK: false, Error: "network is paused"}))
-		return
+func reconciliationPlan(local map[string]fileDescriptor, localDeleted map[string]time.Time, remote map[string]fileDescriptor, remoteDeleted map[string]time.Time, baseline map[string]string, mode string) []SyncPlanItem {
+	if mode != modeSendOnly {
+		return computeSyncPlan(local, localDeleted, remote, remoteDeleted, baseline)
 	}
-
-	var hello SyncHello
-	if err := readFrame(stream, &hello, 2<<20); err != nil {
-		return
-	}
-
-	remotePeerID := stream.Conn().RemotePeer().String()
-	if n.checkFolderAccess != nil {
-		if err := n.checkFolderAccess(hello.FolderID, remotePeerID, true); err != nil {
-			_ = writeFrame(stream, mustJSON(SyncHelloReply{OK: false, Error: err.Error()}))
-			return
+	var plan []SyncPlanItem
+	for p, f := range local {
+		if r, ok := remote[p]; !ok || r.SHA256 != f.SHA256 {
+			plan = append(plan, SyncPlanItem{Path: p, Action: "send", SenderDesc: f, ReceiverDesc: r})
 		}
 	}
-
-	n.receiveMu.Lock()
-	defer n.receiveMu.Unlock()
-
-	targetDir := n.getFolderDirectory(hello.FolderID)
-	if err := os.MkdirAll(targetDir, 0700); err != nil {
-		_ = writeFrame(stream, mustJSON(SyncHelloReply{OK: false, Error: err.Error()}))
-		return
-	}
-
-	localFiles, _, err := scanFolder(targetDir)
-	if err != nil {
-		_ = writeFrame(stream, mustJSON(SyncHelloReply{OK: false, Error: err.Error()}))
-		return
-	}
-
-	localTombstones := n.getTombstones(hello.FolderID)
-
-	reply := SyncHelloReply{
-		OK:           true,
-		ReceiverName: n.Name,
-		Manifest:     localFiles,
-		Tombstones:   localTombstones,
-	}
-	if err := writeFrame(stream, mustJSON(reply)); err != nil {
-		return
-	}
-
-	// 1. Receive files sent from initiator (A -> B)
-	if err := n.receiveBatch(stream, targetDir, hello.FolderID, hello.SenderName); err != nil {
-		return
-	}
-
-	// 2. Send files to initiator (B -> A)
-	if err := n.sendBatch(stream, targetDir, hello.FolderID); err != nil {
-		return
-	}
-
-	// 3. Receive deletion tombstones from initiator
-	var delFrame struct {
-		Deletions []string `json:"deletions"`
-	}
-	if err := readFrame(stream, &delFrame, 1<<20); err == nil {
-		for _, rel := range delFrame.Deletions {
-			full := filepath.Join(targetDir, filepath.FromSlash(rel))
-			if _, err := os.Stat(full); err == nil {
-				_, _ = n.trash.MoveToTrash(hello.FolderID, rel, full)
-				n.recordTombstone(hello.FolderID, rel)
-			}
+	for p := range localDeleted {
+		if r, ok := remote[p]; ok {
+			plan = append(plan, SyncPlanItem{Path: p, Action: "delete_remote", ReceiverDesc: r})
 		}
-		_ = writeFrame(stream, mustJSON(TransferAck{OK: true}))
 	}
-
-	// Record received catalog for visibility
-	rescanned, _, _ := scanFolder(targetDir)
-	fileList := make([]fileDescriptor, 0, len(rescanned))
-	for _, f := range rescanned {
-		fileList = append(fileList, f)
-	}
-	senderPeerID := stream.Conn().RemotePeer().String()
-	n.mu.Lock()
-	folder := n.received[hello.FolderID]
-	folder.ID = hello.FolderID
-	folder.Name = hello.FolderName
-	if folder.Name == "" {
-		folder.Name = hello.FolderID
-	}
-	folder.Path = targetDir
-	folder.PeerID = senderPeerID
-	folder.LastReceived = time.Now().UTC()
-	folder.Files = fileList
-	folder.Bytes = 0
-	for _, f := range fileList {
-		folder.Bytes += f.Size
-	}
-	n.received[hello.FolderID] = folder
-	n.mu.Unlock()
-	_ = n.saveReceivedLocked()
+	return plan
 }
 
-// receiveBatch receives a sequence of TransferHeader frames until header.End == true.
-func (n *Node) receiveBatch(stream network.Stream, folderDir, folderID, peerName string) error {
-	for {
-		var hdr TransferHeader
-		if err := readFrame(stream, &hdr, 64<<10); err != nil {
-			return err
-		}
-		if hdr.End {
-			break
-		}
-
-		targetRelPath := hdr.Path
-		if hdr.IsConflict && hdr.ConflictPath != "" {
-			targetRelPath = hdr.ConflictPath
-		}
-
-		targetFullPath := filepath.Join(folderDir, filepath.FromSlash(targetRelPath))
-		if info, err := os.Lstat(targetFullPath); err == nil {
-			if !info.Mode().IsRegular() {
-				_ = writeFrame(stream, mustJSON(TransferAck{OK: false, Error: "destination is not a regular file"}))
-				return fmt.Errorf("destination is not a regular file")
-			}
-		}
-		if err := os.MkdirAll(filepath.Dir(targetFullPath), 0700); err != nil {
-			_ = writeFrame(stream, mustJSON(TransferAck{OK: false, Error: err.Error()}))
-			return err
-		}
-
-		// Disk space pre-check
-		if err := CheckFreeDiskSpace(folderDir, hdr.Size); err != nil {
-			_ = writeFrame(stream, mustJSON(TransferAck{OK: false, Error: err.Error()}))
-			return err
-		}
-
-		if hdr.IsDelta {
-			// Read chunk manifest
-			var manifest FileChunkManifest
-			if err := readFrame(stream, &manifest, 2<<20); err != nil {
-				_ = writeFrame(stream, mustJSON(TransferAck{OK: false, Error: err.Error()}))
-				return err
-			}
-
-			needed, err := FindNeededChunks(targetFullPath, &manifest)
-			if err != nil {
-				needed = make([]int, len(manifest.Chunks))
-				for i := range manifest.Chunks {
-					needed[i] = i
-				}
-			}
-
-			// Send needed chunks reply
-			if err := writeFrame(stream, mustJSON(NeededChunksReply{Needed: needed})); err != nil {
-				return err
-			}
-
-			// Read incoming chunks
-			chunkMap := make(map[int][]byte, len(needed))
-			for i := 0; i < len(needed); i++ {
-				var cf ChunkFrame
-				if err := readFrame(stream, &cf, 16<<10); err != nil {
-					return err
-				}
-				buf := make([]byte, cf.Size)
-				if _, err := io.ReadFull(stream, buf); err != nil {
-					return err
-				}
-				chunkMap[cf.Index] = buf
-			}
-
-			// Assemble file
-			tmpPath := targetFullPath + ".part-" + fmt.Sprintf("%d", time.Now().UnixNano())
-			err = AssemblePatchedFile(tmpPath, targetFullPath, &manifest, func(idx int) ([]byte, error) {
-				data, ok := chunkMap[idx]
-				if !ok {
-					return nil, errors.New("missing chunk")
-				}
-				return data, nil
-			})
-			if err != nil {
-				_ = os.Remove(tmpPath)
-				_ = writeFrame(stream, mustJSON(TransferAck{OK: false, Error: err.Error()}))
-				return err
-			}
-
-			if err := os.Rename(tmpPath, targetFullPath); err != nil {
-				_ = os.Remove(tmpPath)
-				_ = writeFrame(stream, mustJSON(TransferAck{OK: false, Error: err.Error()}))
-				return fmt.Errorf("install received file: %w", err)
-			}
-			if !hdr.ModTime.IsZero() {
-				_ = os.Chtimes(targetFullPath, hdr.ModTime, hdr.ModTime)
-			}
-		} else {
-			// Direct stream transfer
-			tmpPath := targetFullPath + ".part-" + fmt.Sprintf("%d", time.Now().UnixNano())
-			tmp, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
-			if err != nil {
-				_ = writeFrame(stream, mustJSON(TransferAck{OK: false, Error: err.Error()}))
-				return err
-			}
-
-			hasher := sha256.New()
-			written, copyErr := io.CopyN(io.MultiWriter(tmp, hasher), stream, hdr.Size)
-			_ = tmp.Sync()
-			_ = tmp.Close()
-
-			if copyErr != nil || written != hdr.Size {
-				_ = os.Remove(tmpPath)
-				_ = writeFrame(stream, mustJSON(TransferAck{OK: false, Error: "stream read failure"}))
-				return fmt.Errorf("read file stream: %w", copyErr)
-			}
-
-			calcHash := hex.EncodeToString(hasher.Sum(nil))
-			if hdr.SHA256 != "" && calcHash != hdr.SHA256 {
-				_ = os.Remove(tmpPath)
-				_ = writeFrame(stream, mustJSON(TransferAck{OK: false, Error: "checksum mismatch"}))
-				return fmt.Errorf("checksum mismatch")
-			}
-
-			if err := os.Rename(tmpPath, targetFullPath); err != nil {
-				_ = os.Remove(tmpPath)
-				_ = writeFrame(stream, mustJSON(TransferAck{OK: false, Error: err.Error()}))
-				return fmt.Errorf("install received file: %w", err)
-			}
-			if !hdr.ModTime.IsZero() {
-				_ = os.Chtimes(targetFullPath, hdr.ModTime, hdr.ModTime)
-			}
-		}
-
-		// If this was a conflict, record in ConflictStore
-		if hdr.IsConflict {
-			n.conflicts.Add(Conflict{
-				ID:           fmt.Sprintf("conf-%d", time.Now().UnixNano()),
-				FolderID:     folderID,
-				Path:         hdr.Path,
-				ConflictPath: targetRelPath,
-				LocalSize:    hdr.Size,
-				RemoteSize:   hdr.Size,
-				DeviceName:   peerName,
-				CreatedAt:    time.Now().UTC(),
-			})
-		}
-
-		_ = writeFrame(stream, mustJSON(TransferAck{OK: true}))
+func freezeConflicts(plan []SyncPlanItem, blocked []string) []SyncPlanItem {
+	frozen := make(map[string]bool, len(blocked))
+	for _, p := range blocked {
+		frozen[p] = true
 	}
-
-	return nil
+	result := make([]SyncPlanItem, 0, len(plan))
+	for _, item := range plan {
+		if !frozen[item.Path] {
+			result = append(result, item)
+		}
+	}
+	return result
 }
 
-// sendBatch sends files requested by initiator or needed by responder.
-func (n *Node) sendBatch(stream network.Stream, folderDir, folderID string) error {
-	// Read request list
-	var req struct {
-		FetchPaths []string `json:"fetchPaths"`
-	}
-	if err := readFrame(stream, &req, 1<<20); err != nil {
-		return err
-	}
-
-	for _, relPath := range req.FetchPaths {
-		fullPath := filepath.Join(folderDir, filepath.FromSlash(relPath))
-		stat, err := os.Stat(fullPath)
-		if err != nil {
-			continue
-		}
-
-		hasher := sha256.New()
-		f, err := os.Open(fullPath)
-		if err != nil {
-			continue
-		}
-		_, _ = io.Copy(hasher, f)
-		_ = f.Close()
-		fileHash := hex.EncodeToString(hasher.Sum(nil))
-
-		hdr := TransferHeader{
-			Path:    relPath,
-			Size:    stat.Size(),
-			ModTime: stat.ModTime(),
-			SHA256:  fileHash,
-			IsDelta: stat.Size() >= DefaultChunkSize,
-		}
-
-		if err := writeFrame(stream, mustJSON(hdr)); err != nil {
-			return err
-		}
-
-		if hdr.IsDelta {
-			manifest, err := GenerateChunkManifest(fullPath, DefaultChunkSize)
-			if err != nil {
-				return err
-			}
-			if err := writeFrame(stream, mustJSON(manifest)); err != nil {
-				return err
-			}
-			var neededReply NeededChunksReply
-			if err := readFrame(stream, &neededReply, 64<<10); err != nil {
-				return err
-			}
-
-			// Send needed chunks
-			fileToRead, err := os.Open(fullPath)
-			if err != nil {
-				return err
-			}
-			for _, idx := range neededReply.Needed {
-				chunk := manifest.Chunks[idx]
-				buf := make([]byte, chunk.Size)
-				_, _ = fileToRead.ReadAt(buf, chunk.Offset)
-				cf := ChunkFrame{Index: idx, Size: chunk.Size}
-				if err := writeFrame(stream, mustJSON(cf)); err != nil {
-					_ = fileToRead.Close()
-					return err
-				}
-				if _, err := stream.Write(buf); err != nil {
-					_ = fileToRead.Close()
-					return err
-				}
-			}
-			_ = fileToRead.Close()
-		} else {
-			fileToRead, err := os.Open(fullPath)
-			if err != nil {
-				return err
-			}
-			_, copyErr := io.Copy(stream, fileToRead)
-			_ = fileToRead.Close()
-			if copyErr != nil {
-				return copyErr
-			}
-		}
-
-		var ack TransferAck
-		if err := readFrame(stream, &ack, 16<<10); err != nil || !ack.OK {
-			return fmt.Errorf("transfer ack error: %v", ack.Error)
+func detectTombstones(files map[string]fileDescriptor, previous map[string]string, deleted map[string]time.Time) map[string]time.Time {
+	result := make(map[string]time.Time)
+	for p, t := range deleted {
+		if _, exists := files[p]; !exists {
+			result[p] = t
 		}
 	}
-
-	// Signal end of batch
-	_ = writeFrame(stream, mustJSON(TransferHeader{End: true}))
-	return nil
+	for p := range previous {
+		if _, exists := files[p]; !exists && result[p].IsZero() {
+			result[p] = time.Now().UTC()
+		}
+	}
+	return result
 }
 
-func (n *Node) getFolderDirectory(folderID string) string {
-	n.mu.RLock()
-	defer n.mu.RUnlock()
+func (n *Node) getFolderDirectory(id string) string {
 	if n.getCustomPath != nil {
-		if p := n.getCustomPath(folderID); p != "" {
+		if p := n.getCustomPath(id); p != "" {
 			return p
 		}
 	}
-	return filepath.Join(n.ReceiveDir, folderID)
-}
-
-func (n *Node) getTombstones(folderID string) map[string]time.Time {
 	n.mu.RLock()
-	defer n.mu.RUnlock()
-	res := make(map[string]time.Time)
-	for k, v := range n.tombstones[folderID] {
-		res[k] = v
+	folder := n.received[id]
+	n.mu.RUnlock()
+	if folder.Path != "" {
+		return folder.Path
 	}
-	return res
-}
-
-func (n *Node) recordTombstone(folderID, relPath string) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	if n.tombstones[folderID] == nil {
-		n.tombstones[folderID] = make(map[string]time.Time)
-	}
-	n.tombstones[folderID][relPath] = time.Now().UTC()
+	return filepath.Join(n.ReceiveDir, id)
 }
 
 func (n *Node) saveReceivedLocked() error {
@@ -555,12 +236,250 @@ func (n *Node) saveReceivedLocked() error {
 	return os.Rename(tmp, n.receivedPath)
 }
 
-func mustJSONPretty(v any) ([]byte, error) {
-	return json.MarshalIndent(v, "", "  ")
+func (n *Node) prepareIncoming(hello SyncHello, sender string) (string, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	prior, exists := n.received[hello.FolderID]
+	if exists && prior.PeerID != sender {
+		return "", fmt.Errorf("folder belongs to a different sender")
+	}
+	if !exists {
+		if len(n.received) >= 1000 {
+			return "", fmt.Errorf("too many incoming folders")
+		}
+		prior = ReceivedFolder{ID: hello.FolderID, Name: hello.FolderName, PeerID: sender, PeerName: hello.SenderName, Path: filepath.Join(n.ReceiveDir, hello.FolderID), Status: "pending", Mode: hello.Mode, Files: []fileDescriptor{}}
+		if !n.requireAcceptance {
+			prior.Status = "accepted"
+		}
+		n.received[hello.FolderID] = prior
+		if err := n.saveReceivedLocked(); err != nil {
+			delete(n.received, hello.FolderID)
+			return "", err
+		}
+	}
+	if prior.Status != "accepted" {
+		return "", &syncResponseError{status: prior.Status, message: "receiver must accept this folder before synchronization (" + prior.Status + ")"}
+	}
+	if prior.Mode != "" && prior.Mode != hello.Mode {
+		return "", fmt.Errorf("sync mode differs from the accepted folder")
+	}
+	return prior.Path, nil
 }
 
-// syncBidirectional is the initiator execution loop for two-way synchronization.
-func (a *App) syncBidirectional(requestCtx context.Context, id string) error {
+func (n *Node) handleBidirectionalSync(stream network.Stream) {
+	defer stream.Close()
+	_ = stream.SetDeadline(time.Now().Add(5 * time.Minute))
+	reject := func(err error) {
+		reply := SyncHelloReply{Error: err.Error()}
+		var se *syncResponseError
+		if errors.As(err, &se) {
+			reply.Status = se.status
+		}
+		_ = writeFrame(stream, mustJSON(reply))
+	}
+	if !n.enabled.Load() {
+		reject(errNetworkPaused)
+		return
+	}
+	var hello SyncHello
+	if err := readFrame(stream, &hello, 8<<20); err != nil {
+		return
+	}
+	if !isID(hello.FolderID) || len(hello.FolderName) > 120 || len(hello.SenderName) > 120 || (hello.Mode != modeTwoWay && hello.Mode != modeSendOnly) {
+		reject(fmt.Errorf("invalid sync hello"))
+		return
+	}
+	if len(hello.BlockedPaths) > maxSyncFiles {
+		reject(fmt.Errorf("too many blocked paths"))
+		return
+	}
+	for _, p := range hello.BlockedPaths {
+		if !validRelativePath(p) {
+			reject(fmt.Errorf("invalid blocked path"))
+			return
+		}
+	}
+	if err := validateManifest(hello.Manifest, hello.Tombstones, hello.Baseline); err != nil {
+		reject(err)
+		return
+	}
+	sender := stream.Conn().RemotePeer().String()
+	n.receiveMu.Lock()
+	defer n.receiveMu.Unlock()
+	if n.checkFolderAccess != nil {
+		if err := n.checkFolderAccess(hello.FolderID, sender, true); err != nil {
+			reject(err)
+			return
+		}
+	}
+	targetDir, err := n.prepareIncoming(hello, sender)
+	if err != nil {
+		reject(err)
+		return
+	}
+	n.mu.Lock()
+	n.activeSync[hello.FolderID] = stream
+	n.mu.Unlock()
+	defer func() { n.mu.Lock(); delete(n.activeSync, hello.FolderID); n.mu.Unlock() }()
+	if n.getCustomPath != nil {
+		if p := n.getCustomPath(hello.FolderID); p != "" {
+			targetDir = p
+		}
+	}
+	if err := os.MkdirAll(targetDir, 0700); err != nil {
+		reject(err)
+		return
+	}
+	root, err := os.OpenRoot(targetDir)
+	if err != nil {
+		reject(err)
+		return
+	}
+	defer root.Close()
+	local, _, err := scanFolder(targetDir)
+	if err != nil {
+		reject(err)
+		return
+	}
+	n.mu.RLock()
+	prior := n.received[hello.FolderID]
+	n.mu.RUnlock()
+	previous := make(map[string]string)
+	for _, f := range prior.Files {
+		previous[f.Path] = f.SHA256
+	}
+	deleted := detectTombstones(local, previous, prior.Tombstones)
+	// Persist deletions before transferring, including when this session later fails.
+	n.mu.Lock()
+	prior.Tombstones = deleted
+	n.received[hello.FolderID] = prior
+	err = n.saveReceivedLocked()
+	n.mu.Unlock()
+	if err != nil {
+		reject(err)
+		return
+	}
+	if err := writeFrame(stream, mustJSON(SyncHelloReply{OK: true, ReceiverName: n.Name, Destination: targetDir, Manifest: local, Tombstones: deleted})); err != nil {
+		return
+	}
+	plan := freezeConflicts(reconciliationPlan(hello.Manifest, hello.Tombstones, local, deleted, hello.Baseline, hello.Mode), hello.BlockedPaths)
+	var transferred int64
+	changes := 0
+	incoming := make(map[string]fileDescriptor)
+	fetchable := make(map[string]fileDescriptor)
+	deletable := make(map[string]fileDescriptor)
+	for _, item := range plan {
+		switch item.Action {
+		case "send":
+			incoming[item.Path] = item.SenderDesc
+		case "fetch", "conflict":
+			fetchable[item.Path] = item.ReceiverDesc
+		case "delete_remote":
+			deletable[item.Path] = item.ReceiverDesc
+		}
+	}
+	for {
+		var hdr TransferHeader
+		if err := readFrame(stream, &hdr, 64<<10); err != nil {
+			return
+		}
+		if hdr.End {
+			break
+		}
+		desc, ok := incoming[hdr.Path]
+		if !ok || desc.Size != hdr.Size || desc.SHA256 != hdr.SHA256 {
+			_ = writeFrame(stream, mustJSON(TransferAck{Error: "unexpected transfer"}))
+			return
+		}
+		var expected *fileDescriptor
+		if f, exists := local[hdr.Path]; exists {
+			expected = &f
+		}
+		nbytes, err := receiveSyncFile(stream, root, hdr, hdr.Path, expected)
+		if err != nil {
+			return
+		}
+		transferred += nbytes
+		changes++
+		delete(incoming, hdr.Path)
+	}
+	if len(incoming) != 0 {
+		return
+	}
+	var request struct {
+		FetchPaths []string `json:"fetchPaths"`
+	}
+	if err := readFrame(stream, &request, 2<<20); err != nil {
+		return
+	}
+	seen := make(map[string]bool)
+	for _, p := range request.FetchPaths {
+		desc, ok := fetchable[p]
+		if !ok || seen[p] {
+			return
+		}
+		seen[p] = true
+		nbytes, err := sendSyncFile(stream, root, desc)
+		if err != nil {
+			return
+		}
+		transferred += nbytes
+		changes++
+	}
+	if err := writeFrame(stream, mustJSON(TransferHeader{End: true})); err != nil {
+		return
+	}
+	var delFrame struct {
+		Deletions []string `json:"deletions"`
+	}
+	if err := readFrame(stream, &delFrame, 2<<20); err != nil {
+		return
+	}
+	for _, p := range delFrame.Deletions {
+		desc, ok := deletable[p]
+		if !ok {
+			_ = writeFrame(stream, mustJSON(TransferAck{Error: "unexpected deletion"}))
+			return
+		}
+		if err := n.trash.archiveFromRoot(hello.FolderID, p, root, desc); err != nil {
+			_ = writeFrame(stream, mustJSON(TransferAck{Error: err.Error()}))
+			return
+		}
+		deleted[p] = time.Now().UTC()
+		delete(deletable, p)
+		changes++
+	}
+	if len(deletable) != 0 {
+		return
+	}
+	files, bytes, err := scanFolder(targetDir)
+	if err != nil {
+		return
+	}
+	n.mu.Lock()
+	folder := n.received[hello.FolderID]
+	folder.Files = make([]fileDescriptor, 0, len(files))
+	folder.Bytes = bytes
+	folder.LastReceived = time.Now().UTC()
+	for p, f := range files {
+		folder.Files = append(folder.Files, f)
+		delete(deleted, p)
+	}
+	folder.Tombstones = deleted
+	n.received[hello.FolderID] = folder
+	err = n.saveReceivedLocked()
+	n.mu.Unlock()
+	if err != nil {
+		_ = writeFrame(stream, mustJSON(TransferAck{Error: err.Error()}))
+		return
+	}
+	if n.onFolderSynced != nil {
+		n.onFolderSynced(folder, transferred, changes)
+	}
+	_ = writeFrame(stream, mustJSON(TransferAck{OK: true}))
+}
+
+func (a *App) syncBidirectional(requestCtx context.Context, id string) (result error) {
 	a.mu.Lock()
 	entry, ok := a.folders[id]
 	if !ok {
@@ -579,479 +498,241 @@ func (a *App) syncBidirectional(requestCtx context.Context, id string) error {
 		a.mu.Unlock()
 		return errFolderBusy
 	}
-	peerID, err := parsePeerID(entry.Folder.PeerID)
+	folder := entry.Folder
+	peerID, err := parsePeerID(folder.PeerID)
 	if err != nil {
 		a.mu.Unlock()
 		return err
 	}
-	connectedness := a.main.Host.Network().Connectedness(peerID)
-	if connectedness != network.Connected && connectedness != network.Limited {
-		a.mu.Unlock()
-		return fmt.Errorf("selected device is offline")
-	}
-
 	entry.syncing = true
 	entry.Folder.Status = "syncing"
-	entry.Folder.Error = ""
-	entry.Folder.Progress = 0
-	syncCtx, cancel := context.WithCancel(a.ctx)
-	defer cancel()
+	ctx, cancel := context.WithCancel(a.ctx)
 	entry.cancel = cancel
-	folder := entry.Folder
-	baseline := make(map[string]string, len(entry.manifest))
+	baseline := make(map[string]string)
 	for p, h := range entry.manifest {
 		baseline[p] = h
 	}
-	_ = a.persistLocked()
+	oldDeleted := entry.tombstones
 	a.mu.Unlock()
-
+	defer cancel()
+	defer func() {
+		if ctx.Err() != nil {
+			result = ctx.Err()
+		}
+		a.finishSync(id, result, 0, nil)
+	}()
 	if requestCtx != nil {
 		stop := context.AfterFunc(requestCtx, cancel)
 		defer stop()
 	}
-
-	// 1. Scan local folder
-	localFiles, totalBytes, err := scanFolder(folder.Path)
+	local, _, err := scanFolder(folder.Path)
 	if err != nil {
-		a.finishSync(id, err, 0, nil)
 		return err
 	}
-
+	activeConflicts := a.main.conflicts.List(id)
+	for _, c := range activeConflicts {
+		delete(local, c.ConflictPath)
+	}
+	deleted := detectTombstones(local, baseline, oldDeleted)
 	a.mu.Lock()
-	if current := a.folders[id]; current != nil {
-		current.Folder.Files = len(localFiles)
-		current.Folder.Bytes = totalBytes
-		_ = a.persistLocked()
-	}
+	entry.tombstones = deleted
+	err = a.persistLocked()
 	a.mu.Unlock()
-
-	// 2. Compute local tombstones (files previously in baseline but missing from localFiles)
-	localTombstones := make(map[string]time.Time)
-	for p := range baseline {
-		if _, exists := localFiles[p]; !exists {
-			localTombstones[p] = time.Now().UTC()
-		}
-	}
-
-	// 3. Open stream on /loom/sync/2.0.0
-	stream, err := a.main.Host.NewStream(network.WithAllowLimitedConn(syncCtx, "loom folder bidirectional sync"), peerID, syncProtocol)
 	if err != nil {
-		// Fallback to legacy sync if peer doesn't support /loom/sync/2.0.0
-		return a.syncFolderLegacy(syncCtx, id, folder, localFiles, baseline)
+		return err
+	}
+	stream, err := a.main.Host.NewStream(network.WithAllowLimitedConn(ctx, "loom folder sync"), peerID, syncProtocol)
+	if err != nil {
+		return err
 	}
 	defer stream.Close()
+	stop := context.AfterFunc(ctx, func() { _ = stream.Reset() })
+	defer stop()
 	_ = stream.SetDeadline(time.Now().Add(5 * time.Minute))
-
-	// 4. Send SyncHello
-	hello := SyncHello{
-		FolderID:   id,
-		FolderName: folder.Name,
-		SenderName: a.main.Name,
-		Manifest:   localFiles,
-		Tombstones: localTombstones,
-		Baseline:   baseline,
+	mode := folder.Mode
+	if mode == "" {
+		mode = modeTwoWay
+		if folder.ReadOnly {
+			mode = modeSendOnly
+		}
 	}
+	blocked := make([]string, 0, len(activeConflicts))
+	for _, c := range activeConflicts {
+		blocked = append(blocked, c.Path)
+	}
+	hello := SyncHello{FolderID: id, FolderName: folder.Name, SenderName: a.main.Name, Mode: mode, Manifest: local, Tombstones: deleted, Baseline: baseline}
+	hello.BlockedPaths = blocked
 	if err := writeFrame(stream, mustJSON(hello)); err != nil {
-		a.finishSync(id, err, 0, nil)
 		return err
 	}
-
-	// 5. Read SyncHelloReply
 	var reply SyncHelloReply
-	if err := readFrame(stream, &reply, 2<<20); err != nil {
-		a.finishSync(id, err, 0, nil)
+	if err := readFrame(stream, &reply, 8<<20); err != nil {
 		return err
 	}
 	if !reply.OK {
-		err := errors.New(reply.Error)
-		a.finishSync(id, err, 0, nil)
+		return &syncResponseError{status: reply.Status, message: reply.Error}
+	}
+	if err := validateManifest(reply.Manifest, reply.Tombstones, nil); err != nil {
 		return err
 	}
-
-	// 6. Compute reconciliation plan
-	plan := computeSyncPlan(localFiles, localTombstones, reply.Manifest, reply.Tombstones, baseline)
-
-	var toSend []SyncPlanItem
-	var toFetch []SyncPlanItem
-	var toDeleteLocal []SyncPlanItem
-	var toDeleteRemote []string
-	var conflicts []SyncPlanItem
-
+	root, err := os.OpenRoot(folder.Path)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	plan := freezeConflicts(reconciliationPlan(local, deleted, reply.Manifest, reply.Tombstones, baseline, mode), blocked)
+	fetches := make(map[string]SyncPlanItem)
+	conflictCopies := make(map[string]Conflict)
+	var fetchPaths, remoteDeletes []string
+	var localDeletes []SyncPlanItem
+	var transferred int64
 	for _, item := range plan {
 		switch item.Action {
 		case "send":
-			toSend = append(toSend, item)
-		case "fetch":
-			toFetch = append(toFetch, item)
-		case "conflict":
-			conflicts = append(conflicts, item)
-		case "delete_local":
-			toDeleteLocal = append(toDeleteLocal, item)
-		case "delete_remote":
-			toDeleteRemote = append(toDeleteRemote, item.Path)
-		}
-	}
-
-	// 7. For conflicts, fetch remote version into conflict copy
-	for _, c := range conflicts {
-		conflictRelPath := GenerateConflictPath(c.Path, time.Now().UTC(), reply.ReceiverName)
-		toFetch = append(toFetch, SyncPlanItem{
-			Path:         c.Path,
-			Action:       "conflict_fetch",
-			ReceiverDesc: c.ReceiverDesc,
-		})
-		a.main.conflicts.Add(Conflict{
-			ID:           fmt.Sprintf("conf-%d", time.Now().UnixNano()),
-			FolderID:     id,
-			Path:         c.Path,
-			ConflictPath: conflictRelPath,
-			LocalSize:    c.SenderDesc.Size,
-			RemoteSize:   c.ReceiverDesc.Size,
-			DeviceName:   reply.ReceiverName,
-			CreatedAt:    time.Now().UTC(),
-		})
-	}
-
-	// 8. Send files from A -> B
-	transferred := int64(0)
-	for _, item := range toSend {
-		fullPath := filepath.Join(folder.Path, filepath.FromSlash(item.Path))
-		stat, err := os.Stat(fullPath)
-		if err != nil {
-			continue
-		}
-
-		isDelta := stat.Size() >= DefaultChunkSize
-		hdr := TransferHeader{
-			Path:    item.Path,
-			Size:    stat.Size(),
-			ModTime: stat.ModTime(),
-			SHA256:  item.SenderDesc.SHA256,
-			IsDelta: isDelta,
-		}
-		if err := writeFrame(stream, mustJSON(hdr)); err != nil {
-			a.finishSync(id, err, transferred, nil)
-			return err
-		}
-
-		if isDelta {
-			manifest, err := GenerateChunkManifest(fullPath, DefaultChunkSize)
-			if err != nil {
-				a.finishSync(id, err, transferred, nil)
-				return err
-			}
-			if err := writeFrame(stream, mustJSON(manifest)); err != nil {
-				a.finishSync(id, err, transferred, nil)
-				return err
-			}
-			var neededReply NeededChunksReply
-			if err := readFrame(stream, &neededReply, 64<<10); err != nil {
-				a.finishSync(id, err, transferred, nil)
-				return err
-			}
-
-			fileToRead, err := os.Open(fullPath)
-			if err != nil {
-				a.finishSync(id, err, transferred, nil)
-				return err
-			}
-			for _, idx := range neededReply.Needed {
-				chunk := manifest.Chunks[idx]
-				buf := make([]byte, chunk.Size)
-				_, _ = fileToRead.ReadAt(buf, chunk.Offset)
-				cf := ChunkFrame{Index: idx, Size: chunk.Size}
-				if err := writeFrame(stream, mustJSON(cf)); err != nil {
-					_ = fileToRead.Close()
-					a.finishSync(id, err, transferred, nil)
-					return err
-				}
-				if _, err := stream.Write(buf); err != nil {
-					_ = fileToRead.Close()
-					a.finishSync(id, err, transferred, nil)
-					return err
-				}
-				transferred += chunk.Size
-			}
-			_ = fileToRead.Close()
-		} else {
-			fileToRead, err := os.Open(fullPath)
-			if err != nil {
-				a.finishSync(id, err, transferred, nil)
-				return err
-			}
-			n, copyErr := io.Copy(stream, fileToRead)
-			_ = fileToRead.Close()
-			if copyErr != nil {
-				a.finishSync(id, copyErr, transferred, nil)
-				return copyErr
-			}
+			n, err := sendSyncFile(stream, root, item.SenderDesc)
 			transferred += n
-		}
-
-		var ack TransferAck
-		if err := readFrame(stream, &ack, 16<<10); err != nil || !ack.OK {
-			errMsg := "peer transfer error"
 			if err != nil {
-				errMsg = err.Error()
-			} else if ack.Error != "" {
-				errMsg = ack.Error
+				return err
 			}
-			transferErr := errors.New(errMsg)
-			a.finishSync(id, transferErr, transferred, nil)
-			return transferErr
+		case "fetch":
+			fetches[item.Path] = item
+			fetchPaths = append(fetchPaths, item.Path)
+		case "conflict":
+			alreadySaved := false
+			for _, c := range activeConflicts {
+				if c.Path == item.Path && c.RemoteSHA256 == item.ReceiverDesc.SHA256 {
+					alreadySaved = true
+					break
+				}
+			}
+			if alreadySaved {
+				continue
+			}
+			suffix, err := randomSuffix()
+			if err != nil {
+				return err
+			}
+			c := Conflict{ID: "conf-" + suffix, FolderID: id, Path: item.Path, ConflictPath: GenerateConflictPath(item.Path, time.Now().UTC(), reply.ReceiverName) + "-" + suffix, LocalSize: item.SenderDesc.Size, RemoteSize: item.ReceiverDesc.Size, LocalSHA256: item.SenderDesc.SHA256, RemoteSHA256: item.ReceiverDesc.SHA256, LocalModTime: item.SenderDesc.ModTime, RemoteModTime: item.ReceiverDesc.ModTime, DeviceName: reply.ReceiverName, CreatedAt: time.Now().UTC()}
+			conflictCopies[item.Path] = c
+			fetches[item.Path] = item
+			fetchPaths = append(fetchPaths, item.Path)
+		case "delete_local":
+			localDeletes = append(localDeletes, item)
+		case "delete_remote":
+			remoteDeletes = append(remoteDeletes, item.Path)
 		}
 	}
-	_ = writeFrame(stream, mustJSON(TransferHeader{End: true}))
-
-	// 9. Fetch files from B -> A
-	fetchPaths := make([]string, 0, len(toFetch))
-	for _, item := range toFetch {
-		fetchPaths = append(fetchPaths, item.Path)
-	}
-	if err := writeFrame(stream, mustJSON(map[string]any{"fetchPaths": fetchPaths})); err != nil {
-		a.finishSync(id, err, transferred, nil)
+	if err := writeFrame(stream, mustJSON(TransferHeader{End: true})); err != nil {
 		return err
 	}
-
+	if err := writeFrame(stream, mustJSON(map[string]any{"fetchPaths": fetchPaths})); err != nil {
+		return err
+	}
 	for {
 		var hdr TransferHeader
 		if err := readFrame(stream, &hdr, 64<<10); err != nil {
-			a.finishSync(id, err, transferred, nil)
 			return err
 		}
 		if hdr.End {
 			break
 		}
-
-		targetRelPath := hdr.Path
-		for _, c := range conflicts {
-			if c.Path == hdr.Path {
-				targetRelPath = GenerateConflictPath(c.Path, time.Now().UTC(), reply.ReceiverName)
-				break
-			}
+		item, ok := fetches[hdr.Path]
+		if !ok || hdr.Size != item.ReceiverDesc.Size || hdr.SHA256 != item.ReceiverDesc.SHA256 {
+			return fmt.Errorf("unexpected fetched file")
 		}
-
-		targetFullPath := filepath.Join(folder.Path, filepath.FromSlash(targetRelPath))
-		if info, err := os.Lstat(targetFullPath); err == nil && !info.Mode().IsRegular() {
-			_ = writeFrame(stream, mustJSON(TransferAck{OK: false, Error: "destination is not a regular file"}))
-			a.finishSync(id, fmt.Errorf("destination is not a regular file"), transferred, nil)
-			return fmt.Errorf("destination is not a regular file")
+		destination := hdr.Path
+		var expected *fileDescriptor
+		if c, conflict := conflictCopies[hdr.Path]; conflict {
+			destination = c.ConflictPath
+		} else if f, exists := local[hdr.Path]; exists {
+			expected = &f
 		}
-		if err := os.MkdirAll(filepath.Dir(targetFullPath), 0700); err != nil {
-			_ = writeFrame(stream, mustJSON(TransferAck{OK: false, Error: err.Error()}))
-			a.finishSync(id, err, transferred, nil)
+		n, err := receiveSyncFile(stream, root, hdr, destination, expected)
+		transferred += n
+		if err != nil {
 			return err
 		}
-
-		if hdr.IsDelta {
-			var manifest FileChunkManifest
-			if err := readFrame(stream, &manifest, 2<<20); err != nil {
-				_ = writeFrame(stream, mustJSON(TransferAck{OK: false, Error: err.Error()}))
-				a.finishSync(id, err, transferred, nil)
-				return err
-			}
-			needed, err := FindNeededChunks(targetFullPath, &manifest)
+		if c, conflict := conflictCopies[hdr.Path]; conflict {
+			a.main.conflicts.Add(c)
+			a.mu.Lock()
+			err = a.persistLocked()
+			a.mu.Unlock()
 			if err != nil {
-				needed = make([]int, len(manifest.Chunks))
-				for i := range manifest.Chunks {
-					needed[i] = i
-				}
-			}
-			if err := writeFrame(stream, mustJSON(NeededChunksReply{Needed: needed})); err != nil {
-				a.finishSync(id, err, transferred, nil)
 				return err
-			}
-
-			chunkMap := make(map[int][]byte, len(needed))
-			for i := 0; i < len(needed); i++ {
-				var cf ChunkFrame
-				if err := readFrame(stream, &cf, 16<<10); err != nil {
-					a.finishSync(id, err, transferred, nil)
-					return err
-				}
-				buf := make([]byte, cf.Size)
-				if _, err := io.ReadFull(stream, buf); err != nil {
-					a.finishSync(id, err, transferred, nil)
-					return err
-				}
-				chunkMap[cf.Index] = buf
-				transferred += cf.Size
-			}
-
-			tmpPath := targetFullPath + ".part-" + fmt.Sprintf("%d", time.Now().UnixNano())
-			err = AssemblePatchedFile(tmpPath, targetFullPath, &manifest, func(idx int) ([]byte, error) {
-				data, ok := chunkMap[idx]
-				if !ok {
-					return nil, errors.New("missing chunk")
-				}
-				return data, nil
-			})
-			if err != nil {
-				_ = os.Remove(tmpPath)
-				_ = writeFrame(stream, mustJSON(TransferAck{OK: false, Error: err.Error()}))
-				a.finishSync(id, err, transferred, nil)
-				return err
-			}
-			if err := os.Rename(tmpPath, targetFullPath); err != nil {
-				_ = os.Remove(tmpPath)
-				_ = writeFrame(stream, mustJSON(TransferAck{OK: false, Error: err.Error()}))
-				a.finishSync(id, err, transferred, nil)
-				return err
-			}
-			if !hdr.ModTime.IsZero() {
-				_ = os.Chtimes(targetFullPath, hdr.ModTime, hdr.ModTime)
-			}
-		} else {
-			tmpPath := targetFullPath + ".part-" + fmt.Sprintf("%d", time.Now().UnixNano())
-			tmp, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
-			if err != nil {
-				_ = writeFrame(stream, mustJSON(TransferAck{OK: false, Error: err.Error()}))
-				a.finishSync(id, err, transferred, nil)
-				return err
-			}
-			hasher := sha256.New()
-			n, copyErr := io.CopyN(io.MultiWriter(tmp, hasher), stream, hdr.Size)
-			_ = tmp.Sync()
-			_ = tmp.Close()
-			if copyErr != nil || n != hdr.Size {
-				_ = os.Remove(tmpPath)
-				_ = writeFrame(stream, mustJSON(TransferAck{OK: false, Error: "read failure"}))
-				a.finishSync(id, copyErr, transferred, nil)
-				return copyErr
-			}
-			transferred += n
-			if err := os.Rename(tmpPath, targetFullPath); err != nil {
-				_ = os.Remove(tmpPath)
-				_ = writeFrame(stream, mustJSON(TransferAck{OK: false, Error: err.Error()}))
-				a.finishSync(id, err, transferred, nil)
-				return err
-			}
-			if !hdr.ModTime.IsZero() {
-				_ = os.Chtimes(targetFullPath, hdr.ModTime, hdr.ModTime)
 			}
 		}
-
-		_ = writeFrame(stream, mustJSON(TransferAck{OK: true}))
+		delete(fetches, hdr.Path)
 	}
-
-	// 10. Send deletions for peer to apply
-	_ = writeFrame(stream, mustJSON(map[string]any{"deletions": toDeleteRemote}))
-	var delAck TransferAck
-	_ = readFrame(stream, &delAck, 16<<10)
-
-	// 11. Apply local deletions
-	for _, item := range toDeleteLocal {
-		fullPath := filepath.Join(folder.Path, filepath.FromSlash(item.Path))
-		if _, err := os.Stat(fullPath); err == nil {
-			_, _ = a.main.trash.MoveToTrash(id, item.Path, fullPath)
+	if len(fetches) > 0 {
+		return fmt.Errorf("peer omitted requested files")
+	}
+	if err := writeFrame(stream, mustJSON(map[string]any{"deletions": remoteDeletes})); err != nil {
+		return err
+	}
+	var ack TransferAck
+	if err := readFrame(stream, &ack, 16<<10); err != nil {
+		return err
+	}
+	if !ack.OK {
+		return fmt.Errorf("peer failed sync: %s", ack.Error)
+	}
+	for _, item := range localDeletes {
+		if err := a.main.trash.archiveFromRoot(id, item.Path, root, item.SenderDesc); err != nil {
+			return err
+		}
+		deleted[item.Path] = time.Now().UTC()
+	}
+	// Advance only paths whose values are agreed, never an unresolved conflict or a concurrent local edit.
+	next := make(map[string]string)
+	for p, h := range baseline {
+		next[p] = h
+	}
+	for p, f := range local {
+		if remote, ok := reply.Manifest[p]; ok && f.SHA256 == remote.SHA256 && !containsPeer(blocked, p) {
+			next[p] = f.SHA256
 		}
 	}
-
-	// 12. Re-scan and complete
-	updatedFiles, newBytes, _ := scanFolder(folder.Path)
-	newManifest := make(map[string]string, len(updatedFiles))
-	for p, f := range updatedFiles {
-		newManifest[p] = f.SHA256
+	for p := range baseline {
+		_, hasLocal := local[p]
+		_, hasRemote := reply.Manifest[p]
+		if !hasLocal && !hasRemote && !containsPeer(blocked, p) {
+			delete(next, p)
+		}
 	}
-
+	for _, item := range plan {
+		switch item.Action {
+		case "send":
+			next[item.Path] = item.SenderDesc.SHA256
+		case "fetch":
+			next[item.Path] = item.ReceiverDesc.SHA256
+		case "delete_local", "delete_remote":
+			delete(next, item.Path)
+		}
+	}
+	updated, bytes, err := scanFolder(folder.Path)
+	if err != nil {
+		return err
+	}
+	for p := range updated {
+		delete(deleted, p)
+	}
 	a.mu.Lock()
 	if current := a.folders[id]; current != nil {
-		current.syncing = false
-		current.cancel = nil
-		current.manifest = newManifest
-		current.Folder.Files = len(updatedFiles)
-		current.Folder.Bytes = newBytes
+		current.manifest = next
+		current.tombstones = deleted
+		current.Folder.Files = len(updated)
+		current.Folder.Bytes = bytes
 		current.Folder.Progress = 100
-		current.Folder.Status = "synced"
 		current.Folder.LastSync = time.Now().UTC()
-		current.Folder.Error = ""
-		current.Folder.Conflicts = len(a.main.conflicts.List(id))
-		changedCount := len(toSend) + len(toFetch) + len(conflicts) + len(toDeleteLocal)
-		if changedCount > 0 {
-			a.addActivityLocked("sync", "Folder synchronized", fmt.Sprintf("Synchronized %d item(s) with %s.", changedCount, reply.ReceiverName))
+		current.Folder.RemotePath = reply.Destination
+		if transferred > 0 || len(localDeletes) > 0 || len(remoteDeletes) > 0 || len(conflictCopies) > 0 {
+			a.addActivityLocked("sync", "Folder synchronized", fmt.Sprintf("Processed %d change(s) with %s.", len(plan), reply.ReceiverName))
 		}
 	}
 	a.transferredBytes += transferred
-	_ = a.persistLocked()
+	err = a.persistLocked()
 	a.mu.Unlock()
-
-	return nil
+	return err
 }
 
-// syncFolderLegacy is the fallback single-file transfer for older peers.
-func (a *App) syncFolderLegacy(syncCtx context.Context, id string, folder Folder, files map[string]fileDescriptor, previous map[string]string) error {
-	peerID, _ := parsePeerID(folder.PeerID)
-	sourceRoot, err := os.OpenRoot(folder.Path)
-	if err != nil {
-		a.finishSync(id, err, 0, nil)
-		return err
-	}
-	defer sourceRoot.Close()
-	paths := make([]string, 0, len(files))
-	for name := range files {
-		paths = append(paths, name)
-	}
-	sortedStrings(paths)
-	transferred := int64(0)
-	changed := 0
-	newManifest := make(map[string]string, len(files))
-	for i, name := range paths {
-		if err := syncContextError(syncCtx); err != nil {
-			a.finishSync(id, err, transferred, newManifest)
-			return err
-		}
-		desc := files[name]
-		if previous[name] == desc.SHA256 {
-			newManifest[name] = desc.SHA256
-			continue
-		}
-		input, err := sourceRoot.Open(filepath.FromSlash(name))
-		if err != nil {
-			a.finishSync(id, err, transferred, newManifest)
-			return fmt.Errorf("open source file %s: %w", name, err)
-		}
-		n, transferErr := a.main.TransferFile(network.WithAllowLimitedConn(syncCtx, "loom folder sync"), peerID, id, desc, input, folder.Name)
-		closeErr := input.Close()
-		transferred += n
-		if transferErr != nil {
-			a.finishSync(id, transferErr, transferred, newManifest)
-			return fmt.Errorf("transfer %s: %w", name, transferErr)
-		}
-		if closeErr != nil {
-			a.finishSync(id, closeErr, transferred, newManifest)
-			return closeErr
-		}
-		changed++
-		newManifest[name] = desc.SHA256
-		a.mu.Lock()
-		a.transferredBytes += n
-		if current := a.folders[id]; current != nil {
-			current.Folder.Progress = (i + 1) * 100 / max(1, len(files))
-			current.manifest[name] = desc.SHA256
-		}
-		_ = a.persistLocked()
-		a.mu.Unlock()
-	}
-	if err := syncContextError(syncCtx); err != nil {
-		a.finishSync(id, err, transferred, newManifest)
-		return err
-	}
-	a.mu.Lock()
-	if current := a.folders[id]; current != nil {
-		current.syncing = false
-		current.cancel = nil
-		current.manifest = newManifest
-		current.Folder.Files = len(files)
-		current.Folder.Bytes = folder.Bytes
-		current.Folder.Progress = 100
-		current.Folder.Status = "synced"
-		current.Folder.LastSync = time.Now().UTC()
-		current.Folder.Error = ""
-		if changed > 0 {
-			a.addActivityLocked("sync", "Folder synced", fmt.Sprintf("Transferred %d file(s) to %s.", changed, current.Folder.PeerName))
-		}
-	}
-	_ = a.persistLocked()
-	a.mu.Unlock()
-	return nil
-}
+func mustJSONPretty(v any) ([]byte, error) { return json.MarshalIndent(v, "", "  ") }

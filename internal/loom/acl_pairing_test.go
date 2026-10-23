@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -216,50 +215,18 @@ func TestPairingAndDeviceAPI(t *testing.T) {
 
 	handler := app.Handler("127.0.0.1:8787")
 
-	// 1. Generate pairing PIN
-	resp := serveTestRequest(handler, http.MethodPost, "/api/pairing/generate", "application/json", `{"durationSeconds": 300}`)
-	if resp.Code != http.StatusOK {
-		t.Fatalf("pairing generate status=%d: %s", resp.Code, resp.Body.String())
+	// Enrollment is deliberately disabled until it can apply credentials and join end to end.
+	for _, path := range []string{"/api/pairing/generate", "/api/pairing/claim"} {
+		resp := serveTestRequest(handler, http.MethodPost, path, "application/json", `{}`)
+		if resp.Code != http.StatusNotImplemented || strings.Contains(resp.Body.String(), "networkKey") {
+			t.Fatalf("unsafe pairing response: %d %s", resp.Code, resp.Body.String())
+		}
 	}
-	var session PairingSession
-	if err := json.Unmarshal(resp.Body.Bytes(), &session); err != nil {
-		t.Fatalf("decode pairing session: %v", err)
-	}
-	if len(session.PIN) != 6 {
-		t.Fatalf("expected 6-digit PIN, got %q", session.PIN)
-	}
-	if !strings.Contains(session.Formatted, "-") {
-		t.Fatalf("expected formatted PIN with hyphen, got %q", session.Formatted)
-	}
-
-	// 2. Check pairing status
 	respStatus := serveTestRequest(handler, http.MethodGet, "/api/pairing", "", "")
-	if respStatus.Code != http.StatusOK {
-		t.Fatalf("pairing status code=%d", respStatus.Code)
-	}
 	var statusBody map[string]any
 	_ = json.Unmarshal(respStatus.Body.Bytes(), &statusBody)
-	if statusBody["active"] != true {
-		t.Fatalf("expected active=true in pairing status")
-	}
-
-	// 3. Claim with wrong PIN
-	claimFail := serveTestRequest(handler, http.MethodPost, "/api/pairing/claim", "application/json", `{"pin": "000-000"}`)
-	if claimFail.Code == http.StatusOK {
-		t.Fatalf("expected claim with wrong PIN to fail")
-	}
-
-	// 4. Claim with valid PIN
-	claimSuccess := serveTestRequest(handler, http.MethodPost, "/api/pairing/claim", "application/json", fmt.Sprintf(`{"pin": %q}`, session.Formatted))
-	if claimSuccess.Code != http.StatusOK {
-		t.Fatalf("expected claim success, got status=%d: %s", claimSuccess.Code, claimSuccess.Body.String())
-	}
-	var payload PairingPayload
-	if err := json.Unmarshal(claimSuccess.Body.Bytes(), &payload); err != nil {
-		t.Fatalf("decode payload: %v", err)
-	}
-	if payload.NetworkKey == "" {
-		t.Fatalf("expected non-empty network key in claimed payload")
+	if statusBody["active"] != false || statusBody["available"] != false {
+		t.Fatal("pairing must not announce availability")
 	}
 
 	// 5. Block and Unblock device via API

@@ -207,6 +207,10 @@ class LoomProcess:
 class FixtureHandler(http.server.BaseHTTPRequestHandler):
 	body = b"Loom normal-mode service fixture over the private mesh.\n"
 
+	def do_HEAD(self) -> None:
+		self.send_response(200)
+		self.end_headers()
+
 	def do_GET(self) -> None:
 		if self.path != "/fixture":
 			self.send_error(404)
@@ -260,6 +264,16 @@ def sync_folder(base_url: str, folder_id: str) -> None:
 	raise SmokeFailure("folder sync remained busy for 25 seconds")
 
 
+def accept_folder(receiver_url: str, folder_id: str, destination: Path | None = None) -> None:
+	wait_for("incoming folder invitation", lambda: any(
+		folder.get("id") == folder_id and folder.get("status") == "pending"
+		for folder in get_state(receiver_url).get("receivedFolders", [])), 15.0)
+	body = {"action": "accept"}
+	if destination is not None:
+		body["path"] = str(destination)
+	api_json(receiver_url, f"/api/received/{folder_id}", "POST", body)
+
+
 def run_checks(binary: Path, scratch: Path, network_key: str) -> None:
 	api_a_port = reserve_port()
 	api_b_port = reserve_port()
@@ -306,7 +320,10 @@ def run_checks(binary: Path, scratch: Path, network_key: str) -> None:
 		})
 		folder_id = folder.get("id")
 		require(isinstance(folder_id, str) and folder_id, "folder registration did not return an id")
-		received = peer_b.data_dir / "received" / folder_id / file_path.name
+		destination = scratch / "accepted-destination"
+		destination.mkdir()
+		received = destination / file_path.name
+		accept_folder(peer_b.base_url, folder_id, destination)
 		wait_file(received, first_bytes)
 		require(hashlib.sha256(received.read_bytes()).digest() == hashlib.sha256(first_bytes).digest(),
 			"initial receiver file hash did not match the source")
@@ -334,6 +351,7 @@ def run_checks(binary: Path, scratch: Path, network_key: str) -> None:
 		reverse_folder = api_json(peer_b.base_url, "/api/folders", "POST", {
 			"path": str(reverse_source), "peerId": peer_a_id, "name": "Peer B replies",
 		})
+		accept_folder(peer_a.base_url, reverse_folder["id"])
 		wait_file(peer_a.data_dir / "received" / reverse_folder["id"] / reverse_name, reverse_bytes)
 		wait_for("reverse transfer receipt", lambda: receipt_matches(
 			peer_a.base_url, reverse_folder["id"], "Peer B replies", peer_b_id, reverse_bytes), 10.0)
@@ -342,8 +360,23 @@ def run_checks(binary: Path, scratch: Path, network_key: str) -> None:
 		require(status == 200 and downloaded == reverse_bytes, "encoded filename download failed")
 		print("PASS the second computer can also share a separate folder back to the first")
 
+		# Exercise the same shared folder in both directions and receiver-side deletion.
+		first_bytes = b"Edited on the receiver and synchronized back to the source.\n"
+		received.write_bytes(first_bytes)
+		wait_file(file_path, first_bytes)
+		deleted_source = source / "remove-me.txt"
+		deleted_receiver = destination / "remove-me.txt"
+		deleted_source.write_bytes(b"recoverable deletion\n")
+		wait_file(deleted_receiver, b"recoverable deletion\n")
+		deleted_receiver.unlink()
+		wait_for("receiver deletion at source", lambda: not deleted_source.exists(), 15.0)
+		print("PASS receiver edits and deletions propagate back through the same shared folder")
+
 		peer_b.stop()
 		wait_peer(peer_a.base_url, peer_b_id, False, timeout=20.0)
+		offline_service = find_service(get_state(peer_a.base_url), peer_b_id, service_id)
+		require(offline_service is not None and offline_service.get("status") == "device_offline",
+			"offline device's service was not retained with an offline status")
 		peer_b.start()
 		peer_b.wait_ready()
 		restarted_state = api_json(peer_b.base_url, "/api/state")
@@ -381,7 +414,8 @@ def run_checks(binary: Path, scratch: Path, network_key: str) -> None:
 		nested.parent.mkdir()
 		nested_bytes = bytes(range(256)) * 64
 		nested.write_bytes(nested_bytes)
-		wait_file(peer_b.data_dir / "received" / folder_id / "nested" / "new.bin", nested_bytes)
+		wait_file(destination / "nested" / "new.bin", nested_bytes)
+		require(not deleted_source.exists() and not deleted_receiver.exists(), "deletion resurrected after restart")
 		print("PASS new nested binary files sync automatically after the sender restarts")
 		if discovery == "manual" or discovery_after_restart == "manual":
 			print("NOTE This run used the advertised multiaddress fallback where mDNS discovery was not observed.")

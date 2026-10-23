@@ -12,18 +12,18 @@ import (
 
 // Conflict describes a detected concurrent edit collision.
 type Conflict struct {
-	ID           string    `json:"id"`
-	FolderID     string    `json:"folderId"`
-	Path         string    `json:"path"`
-	ConflictPath string    `json:"conflictPath"`
-	LocalModTime time.Time `json:"localModTime"`
+	ID            string    `json:"id"`
+	FolderID      string    `json:"folderId"`
+	Path          string    `json:"path"`
+	ConflictPath  string    `json:"conflictPath"`
+	LocalModTime  time.Time `json:"localModTime"`
 	RemoteModTime time.Time `json:"remoteModTime"`
-	LocalSize    int64     `json:"localSize"`
-	RemoteSize   int64     `json:"remoteSize"`
-	LocalSHA256  string    `json:"localSha256"`
-	RemoteSHA256 string    `json:"remoteSha256"`
-	DeviceName   string    `json:"deviceName"`
-	CreatedAt    time.Time `json:"createdAt"`
+	LocalSize     int64     `json:"localSize"`
+	RemoteSize    int64     `json:"remoteSize"`
+	LocalSHA256   string    `json:"localSha256"`
+	RemoteSHA256  string    `json:"remoteSha256"`
+	DeviceName    string    `json:"deviceName"`
+	CreatedAt     time.Time `json:"createdAt"`
 }
 
 // ConflictResolution represents the user's resolution decision.
@@ -130,23 +130,40 @@ func (cs *ConflictStore) Resolve(folderRoot string, folderID, conflictID string,
 		return os.ErrNotExist
 	}
 
-	origFullPath := filepath.Join(folderRoot, filepath.FromSlash(c.Path))
-	conflictFullPath := filepath.Join(folderRoot, filepath.FromSlash(c.ConflictPath))
+	if !validRelativePath(c.Path) || !validRelativePath(c.ConflictPath) {
+		return fmt.Errorf("invalid conflict path")
+	}
+	root, err := os.OpenRoot(folderRoot)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	if res == ResolutionKeepRemote && c.LocalSHA256 != "" {
+		if err := checkSyncDestination(root, c.Path, &fileDescriptor{SHA256: c.LocalSHA256}); err != nil {
+			return err
+		}
+	}
+	if c.RemoteSHA256 != "" {
+		if err := checkSyncDestination(root, c.ConflictPath, &fileDescriptor{SHA256: c.RemoteSHA256}); err != nil {
+			return err
+		}
+	}
 
 	switch res {
 	case ResolutionKeepLocal:
 		// Delete the conflict copy
-		if err := os.Remove(conflictFullPath); err != nil && !os.IsNotExist(err) {
+		if err := root.Remove(c.ConflictPath); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("remove conflict copy: %w", err)
 		}
 	case ResolutionKeepRemote:
 		// Replace original file with the conflict copy
-		if err := os.Rename(conflictFullPath, origFullPath); err != nil {
-			// Fallback copy across filesystems
-			if err := copyFile(conflictFullPath, origFullPath); err != nil {
-				return fmt.Errorf("replace original with conflict copy: %w", err)
-			}
-			_ = os.Remove(conflictFullPath)
+		f, err := openSyncFile(root, c.ConflictPath)
+		if err != nil {
+			return err
+		}
+		_ = f.Close()
+		if err := root.Rename(c.ConflictPath, c.Path); err != nil {
+			return fmt.Errorf("replace original with conflict copy: %w", err)
 		}
 	case ResolutionKeepBoth:
 		// Keep both files on disk; just remove from conflict tracking

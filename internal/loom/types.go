@@ -54,6 +54,8 @@ type Folder struct {
 	Error        string            `json:"error"`
 	Conflicts    int               `json:"conflicts"`
 	AllowedPeers []string          `json:"allowedPeers,omitempty"`
+	Mode         string            `json:"mode"`
+	RemotePath   string            `json:"remotePath,omitempty"`
 	ReadOnly     bool              `json:"readOnly,omitempty"`
 	Manifest     map[string]string `json:"-"`
 }
@@ -67,14 +69,17 @@ type Activity struct {
 }
 
 type ReceivedFolder struct {
-	ID           string           `json:"id"`
-	Name         string           `json:"name"`
-	Path         string           `json:"path"`
-	PeerID       string           `json:"peerId"`
-	PeerName     string           `json:"peerName"`
-	Files        []fileDescriptor `json:"files"`
-	Bytes        int64            `json:"bytes"`
-	LastReceived time.Time        `json:"lastReceived"`
+	ID           string               `json:"id"`
+	Name         string               `json:"name"`
+	Path         string               `json:"path"`
+	PeerID       string               `json:"peerId"`
+	PeerName     string               `json:"peerName"`
+	Files        []fileDescriptor     `json:"files"`
+	Bytes        int64                `json:"bytes"`
+	LastReceived time.Time            `json:"lastReceived"`
+	Status       string               `json:"status"`
+	Mode         string               `json:"mode"`
+	Tombstones   map[string]time.Time `json:"tombstones,omitempty"`
 }
 
 type Stats struct {
@@ -105,6 +110,8 @@ type RelayInfo struct {
 }
 
 type ServiceRecord struct {
+	Protocol     string   `json:"protocol,omitempty"`
+	Status       string   `json:"status,omitempty"`
 	ID           string   `json:"id"`
 	Name         string   `json:"name"`
 	Target       string   `json:"target"`

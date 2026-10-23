@@ -73,6 +73,8 @@ export type Folder = {
   conflicts?: number
   allowedPeers?: string[]
   readOnly?: boolean
+  mode?: "two_way" | "send_only"
+  remotePath?: string
 }
 
 export type Activity = {
@@ -92,6 +94,8 @@ export type ReceivedFolder = {
   files: { path: string; size: number; sha256: string }[]
   bytes: number
   lastReceived: string
+  status: "pending" | "accepted" | "paused" | "declined"
+  mode: "two_way" | "send_only"
 }
 
 export type RelayInfo = {

@@ -91,18 +91,15 @@ COMMANDS:
   devices block <peer-id>           Block a device and drop all active connections
   devices unblock <peer-id>         Unblock a previously blocked device
   devices blocked                   List blocked devices
-  pair                              Generate a 6-digit PIN to pair a new device
-  pair join <pin> [--relay <addr>]  Join a network using an ephemeral pairing PIN
-  pair status                       Check active pairing session
   acl                               Show granular service grants and folder permissions
   services                          List published services across the mesh
-  publish <target> [--name <name>] [--trusted] [--allow <peers>]  Publish a local loopback HTTP service
+  publish <target> [--name <name>] [--trusted] [--allow <peers>]  Publish a loopback service (--protocol http|tcp)
   unpublish <id>                    Stop publishing a local service
   forwards                          List active TCP port forwards
-  forward <peer>:<target> [--port P] Forward a local TCP port to a peer's service or port
+  forward <peer>:<target> [--port P] Forward to an explicitly published TCP service
   forward stop <id>                 Stop an active TCP port forward
-  sync                              List sending and received sync folders
-  sync add <path> --to <device> [--allow <peers>] [--readonly]  Sync a local folder to a target device
+  sync                              List shared folders and incoming invitations
+  sync add <path> --to <device> [--allow <peers>] [--send-only]  Sync a local folder to a target device
   sync now <folder-id>              Trigger an immediate sync
   sync pause <folder-id>            Pause syncing for a folder
   sync resume <folder-id>           Resume syncing for a folder
@@ -126,7 +123,8 @@ GLOBAL OPTIONS:
 EXAMPLES:
   loom status
   loom publish localhost:3000 --name "Dev preview" --trusted
-  loom forward linux:5432 --port 5432
+  loom publish 127.0.0.1:5432 --name database --protocol tcp
+  loom forward linux:database --port 5432
   loom sync add ./my-assets --to "Studio Workstation"
   loom devices connect /ip4/192.168.1.50/tcp/4001/p2p/12D3KooW...
   loom doctor`)
@@ -249,7 +247,7 @@ func (r *Runner) RunStatus(ctx context.Context, args []string) error {
 
 	// Sending Folders Table
 	if len(state.Folders) > 0 {
-		PrintHeader(r.Out, fmt.Sprintf("Sending Folders (%d)", len(state.Folders)))
+		PrintHeader(r.Out, fmt.Sprintf("Shared Folders (%d)", len(state.Folders)))
 		w = NewTableWriter(r.Out)
 		fmt.Fprintln(w, "NAME\tDESTINATION\tSTATUS\tFILES\tSIZE\tPATH")
 		for _, f := range state.Folders {
@@ -280,7 +278,7 @@ func (r *Runner) RunStatus(ctx context.Context, args []string) error {
 
 	// Received Folders Table
 	if len(state.ReceivedFolders) > 0 {
-		PrintHeader(r.Out, fmt.Sprintf("Received Folders (%d)", len(state.ReceivedFolders)))
+		PrintHeader(r.Out, fmt.Sprintf("Incoming Shares (%d)", len(state.ReceivedFolders)))
 		w = NewTableWriter(r.Out)
 		fmt.Fprintln(w, "NAME\tSENDER\tFILES\tSIZE\tLOCAL PATH\tLAST RECEIVED")
 		for _, rf := range state.ReceivedFolders {
@@ -475,6 +473,7 @@ func (r *Runner) RunServices(ctx context.Context, args []string) error {
 // RunServicesPublish handles publishing a local service.
 func (r *Runner) RunServicesPublish(ctx context.Context, args []string) error {
 	var target, name string
+	protocol := "http"
 	var trusted bool
 	var allowedPeers []string
 	for i := 0; i < len(args); i++ {
@@ -484,6 +483,11 @@ func (r *Runner) RunServicesPublish(ctx context.Context, args []string) error {
 			i++
 		} else if strings.HasPrefix(arg, "--name=") || strings.HasPrefix(arg, "-name=") {
 			name = strings.SplitN(arg, "=", 2)[1]
+		} else if arg == "--protocol" && i+1 < len(args) {
+			protocol = args[i+1]
+			i++
+		} else if strings.HasPrefix(arg, "--protocol=") {
+			protocol = strings.TrimPrefix(arg, "--protocol=")
 		} else if arg == "--trusted" || arg == "-trusted" {
 			trusted = true
 		} else if strings.HasPrefix(arg, "--trusted=") || strings.HasPrefix(arg, "-trusted=") {
@@ -511,15 +515,19 @@ func (r *Runner) RunServicesPublish(ctx context.Context, args []string) error {
 		return fmt.Errorf("usage: loom publish <target-url> [--name <name>] [--trusted] [--allow <peer-ids>]\nExample: loom publish http://127.0.0.1:3000 --name preview --trusted --allow peerA,peerB")
 	}
 
-	// Normalization: if user typed "localhost:3000" or "127.0.0.1:3000", prepend http://
-	if !strings.HasPrefix(target, "http://") && !strings.HasPrefix(target, "https://") {
+	if protocol != "http" && protocol != "tcp" {
+		return fmt.Errorf("protocol must be http or tcp")
+	}
+	if protocol == "http" && !strings.Contains(target, "://") {
 		target = "http://" + target
 	}
 	u, err := url.Parse(target)
-	if err != nil || u.Hostname() == "" {
-		return fmt.Errorf("invalid target URL %q: must be a loopback HTTP URL like http://127.0.0.1:3000", target)
+	if protocol == "http" && (err != nil || u.Hostname() == "") {
+		return fmt.Errorf("invalid HTTP target")
 	}
-
+	if protocol == "tcp" {
+		u = &url.URL{Host: target}
+	}
 	svcName := name
 	if svcName == "" {
 		svcName = "Service on port " + u.Port()
@@ -528,7 +536,7 @@ func (r *Runner) RunServicesPublish(ctx context.Context, args []string) error {
 		}
 	}
 
-	svc, err := r.Client.PublishServiceWithOptions(ctx, svcName, target, trusted, allowedPeers)
+	svc, err := r.Client.PublishServiceProtocol(ctx, svcName, target, protocol, trusted, allowedPeers)
 	if err != nil {
 		return fmt.Errorf("failed to publish service: %w", err)
 	}
@@ -536,7 +544,9 @@ func (r *Runner) RunServicesPublish(ctx context.Context, args []string) error {
 	fmt.Fprintf(r.Out, "%s Published service %q\n", Colorize(colorGreen, "✓"), svc.Name)
 	fmt.Fprintf(r.Out, "  ID:        %s\n", svc.ID)
 	fmt.Fprintf(r.Out, "  Target:    %s\n", svc.Target)
-	if svc.Trusted {
+	if protocol == "tcp" {
+		fmt.Fprintln(r.Out, "  Protocol:  TCP (published service required for forwarding)")
+	} else if svc.Trusted {
 		fmt.Fprintf(r.Out, "  Mode:      %s\n", Colorize(colorYellow, "Trusted (Origin/Auth/Cookie headers preserved)"))
 	} else {
 		fmt.Fprintf(r.Out, "  Mode:      %s\n", Colorize(colorCyan, "Sandboxed (headers stripped, CSP sandbox enforced)"))
@@ -695,33 +705,21 @@ func (r *Runner) RunForward(ctx context.Context, args []string) error {
 		return fmt.Errorf("destination peer %q not found or offline", peerSpec)
 	}
 
-	var serviceID, target string
-	// Check if targetSpec is an integer port number
-	if portNum, err := strconv.Atoi(targetSpec); err == nil && portNum > 0 && portNum <= 65535 {
-		target = fmt.Sprintf("127.0.0.1:%d", portNum)
-		if localPort == 0 {
-			localPort = portNum
+	var serviceID string
+	portNum, _ := strconv.Atoi(targetSpec)
+	for _, svc := range state.Services {
+		if svc.DeviceID != targetPeerID || svc.Protocol != "tcp" {
+			continue
 		}
-	} else {
-		// Look for service matching targetSpec on that peer
-		for _, svc := range state.Services {
-			if (svc.DeviceID == targetPeerID || strings.EqualFold(svc.DeviceName, targetPeerName)) &&
-				(svc.ID == targetSpec || strings.EqualFold(svc.Name, targetSpec) || strings.HasPrefix(svc.ID, targetSpec)) {
-				serviceID = svc.ID
-				target = svc.Target
-				break
-			}
-		}
-		if serviceID == "" {
-			if strings.Contains(targetSpec, ":") {
-				target = targetSpec
-			} else {
-				return fmt.Errorf("could not resolve %q to a port or published service on peer %q", targetSpec, targetPeerName)
-			}
+		if svc.ID == targetSpec || strings.EqualFold(svc.Name, targetSpec) || strings.HasPrefix(svc.ID, targetSpec) || (portNum > 0 && svc.Port == portNum) {
+			serviceID = svc.ID
+			break
 		}
 	}
-
-	fwd, err := r.Client.StartForward(ctx, targetPeerID, serviceID, target, localPort)
+	if serviceID == "" {
+		return fmt.Errorf("no published TCP service %q on %q; publish it on that device first", targetSpec, targetPeerName)
+	}
+	fwd, err := r.Client.StartForward(ctx, targetPeerID, serviceID, "", localPort)
 	if err != nil {
 		return fmt.Errorf("failed to start port forward: %w", err)
 	}
@@ -766,7 +764,7 @@ func (r *Runner) RunSync(ctx context.Context, args []string) error {
 			})
 		}
 
-		PrintHeader(r.Out, fmt.Sprintf("Sending Folders (%d)", len(state.Folders)))
+		PrintHeader(r.Out, fmt.Sprintf("Shared Folders (%d)", len(state.Folders)))
 		if len(state.Folders) == 0 {
 			fmt.Fprintln(r.Out, "  No sending folders registered. Add one with: loom sync add <path> --to <device>")
 		} else {
@@ -799,7 +797,7 @@ func (r *Runner) RunSync(ctx context.Context, args []string) error {
 		}
 		fmt.Fprintln(r.Out)
 
-		PrintHeader(r.Out, fmt.Sprintf("Received Folders (%d)", len(state.ReceivedFolders)))
+		PrintHeader(r.Out, fmt.Sprintf("Incoming Shares (%d)", len(state.ReceivedFolders)))
 		if len(state.ReceivedFolders) == 0 {
 			fmt.Fprintln(r.Out, "  No folders received from peers yet.")
 		} else {
@@ -909,7 +907,7 @@ func (r *Runner) runSyncAdd(ctx context.Context, args []string) error {
 					allowedPeers = append(allowedPeers, trimmed)
 				}
 			}
-		} else if arg == "--readonly" || arg == "-readonly" || arg == "--read-only" {
+		} else if arg == "--send-only" || arg == "--readonly" || arg == "-readonly" || arg == "--read-only" {
 			readOnly = true
 		} else if !strings.HasPrefix(arg, "-") && path == "" {
 			path = arg
@@ -917,7 +915,7 @@ func (r *Runner) runSyncAdd(ctx context.Context, args []string) error {
 	}
 
 	if path == "" || toDevice == "" {
-		return fmt.Errorf("usage: loom sync add <path> --to <device-name-or-id> [--name <name>] [--allow <peers>] [--readonly]")
+		return fmt.Errorf("usage: loom sync add <path> --to <device-name-or-id> [--name <name>] [--allow <peers>] [--send-only]")
 	}
 
 	folderPath, err := filepath.Abs(path)
@@ -976,8 +974,9 @@ func (r *Runner) runSyncAdd(ctx context.Context, args []string) error {
 	fmt.Fprintf(r.Out, "  ID:          %s\n", folder.ID)
 	fmt.Fprintf(r.Out, "  Destination: %s (%s)\n", targetPeerName, folder.PeerID)
 	fmt.Fprintf(r.Out, "  Local Path:  %s\n", folder.Path)
+	fmt.Fprintln(r.Out, "  Next: accept this folder in the other device’s Incoming shares dashboard.")
 	if folder.ReadOnly {
-		fmt.Fprintf(r.Out, "  Read Only:   %s\n", Colorize(colorYellow, "Yes (incoming remote writes blocked)"))
+		fmt.Fprintf(r.Out, "  Direction:   %s\n", Colorize(colorYellow, "Send only (source stays authoritative)"))
 	}
 	if len(folder.AllowedPeers) > 0 {
 		fmt.Fprintf(r.Out, "  Allowed:     %s\n", strings.Join(folder.AllowedPeers, ", "))
@@ -1300,84 +1299,9 @@ func (r *Runner) RunRelaysRemove(ctx context.Context, args []string) error {
 	return nil
 }
 
-// RunPair handles ephemeral PIN pairing commands:
-//   loom pair (or loom pair generate)
-//   loom pair join <code> [--relay <addr>]
-//   loom pair status
-func (r *Runner) RunPair(ctx context.Context, args []string) error {
-	if len(args) == 0 || args[0] == "generate" {
-		session, err := r.Client.GeneratePairingCode(ctx, 10*time.Minute)
-		if err != nil {
-			return fmt.Errorf("failed to generate pairing code: %w", err)
-		}
-		PrintHeader(r.Out, "Ephemeral Device Pairing")
-		fmt.Fprintf(r.Out, "  Pairing PIN:  %s\n", Colorize(colorBold+colorCyan, session.Formatted))
-		fmt.Fprintf(r.Out, "  Expires in:   %s (%s)\n",
-			Colorize(colorYellow, "10m 00s"),
-			session.ExpiresAt.Format("15:04:05 MST"))
-		fmt.Fprintf(r.Out, "  Topic Hash:   %s\n\n", session.Topic)
-		fmt.Fprintln(r.Out, "  To pair another device, run the following command on that device:")
-		fmt.Fprintf(r.Out, "    %s\n\n", Colorize(colorBold, "loom pair join "+session.Formatted))
-		return nil
-	}
-
-	sub := args[0]
-	switch sub {
-	case "join":
-		if len(args) < 2 {
-			return fmt.Errorf("usage: loom pair join <6-digit-pin> [--relay <relay-multiaddr>]")
-		}
-		pin := args[1]
-		var relay string
-		for i := 2; i < len(args); i++ {
-			arg := args[i]
-			if (arg == "--relay" || arg == "-relay") && i+1 < len(args) {
-				relay = args[i+1]
-				i++
-			} else if strings.HasPrefix(arg, "--relay=") {
-				relay = strings.SplitN(arg, "=", 2)[1]
-			}
-		}
-
-		fmt.Fprintf(r.Out, "Redeeming pairing PIN %s...\n", pin)
-		payload, err := r.Client.ClaimPairingCode(ctx, pin, relay)
-		if err != nil {
-			return fmt.Errorf("pairing failed: %w", err)
-		}
-
-		fmt.Fprintf(r.Out, "%s Successfully paired with private network!\n", Colorize(colorGreen, "✓"))
-		fmt.Fprintf(r.Out, "  Network ID:   %s\n", payload.NetworkID)
-		if payload.NetworkName != "" {
-			fmt.Fprintf(r.Out, "  Network Name: %s\n", payload.NetworkName)
-		}
-		if payload.IssuedBy != "" {
-			fmt.Fprintf(r.Out, "  Paired Peer:  %s\n", payload.IssuedBy)
-		}
-		return nil
-
-	case "status":
-		session, err := r.Client.GetPairingSession(ctx)
-		if err != nil {
-			return fmt.Errorf("failed to fetch pairing status: %w", err)
-		}
-		if session == nil {
-			fmt.Fprintln(r.Out, "No active pairing session.")
-			return nil
-		}
-		remaining := time.Until(session.ExpiresAt).Round(time.Second)
-		if remaining <= 0 {
-			fmt.Fprintln(r.Out, "No active pairing session (expired).")
-			return nil
-		}
-		PrintHeader(r.Out, "Active Pairing Session")
-		fmt.Fprintf(r.Out, "  Pairing PIN:  %s\n", Colorize(colorBold+colorCyan, session.Formatted))
-		fmt.Fprintf(r.Out, "  Remaining:    %s\n", remaining)
-		fmt.Fprintf(r.Out, "  Topic Hash:   %s\n", session.Topic)
-		return nil
-
-	default:
-		return fmt.Errorf("unknown pair subcommand %q. Available: generate, join <code>, status", sub)
-	}
+// RunPair explains the supported setup until end-to-end enrollment is available.
+func (r *Runner) RunPair(context.Context, []string) error {
+	return fmt.Errorf("PIN enrollment is unavailable; start both devices with the same --network-key-file, then use loom devices connect <multiaddress>")
 }
 
 // RunACL displays access control lists, service grants, folder permissions, and blocked devices.

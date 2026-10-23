@@ -46,6 +46,7 @@ func mockState() loom.State {
 			},
 		},
 		Services: []loom.Service{
+			{ID: "tcp-database", Name: "Database", DeviceID: "12D3KooWStudioPeerID", DeviceName: "Studio Workstation", Protocol: "tcp", Target: "127.0.0.1:5432", Port: 5432, Status: "available"},
 			{
 				ID:         "svc-1234",
 				Name:       "Project Preview",
@@ -717,70 +718,11 @@ func TestRunRelaysListAddRemove(t *testing.T) {
 }
 
 func TestRunPairCommands(t *testing.T) {
-	mockSession := loom.PairingSession{
-		PIN:       "583921",
-		Formatted: "583-921",
-		Topic:     "aabbccddeeff11223344",
-		ExpiresAt: time.Now().UTC().Add(10 * time.Minute),
-		Payload: loom.PairingPayload{
-			NetworkKey: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-			NetworkID:  "loom-test-net",
-			IssuedBy:   "12D3KooWPrimaryPeerID",
-		},
-	}
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/api/pairing/generate":
-			_ = json.NewEncoder(w).Encode(mockSession)
-		case r.Method == http.MethodGet && r.URL.Path == "/api/pairing":
-			_ = json.NewEncoder(w).Encode(map[string]any{"active": true, "session": mockSession})
-		case r.Method == http.MethodPost && r.URL.Path == "/api/pairing/claim":
-			_ = json.NewEncoder(w).Encode(mockSession.Payload)
-		default:
-			http.NotFound(w, r)
+	runner := &Runner{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}
+	for _, args := range [][]string{{"pair"}, {"pair", "status"}, {"pair", "join", "123-456"}} {
+		if err := runner.Execute(context.Background(), args); err == nil || !strings.Contains(err.Error(), "unavailable") {
+			t.Fatalf("pair must explain unavailable enrollment: %v", err)
 		}
-	}))
-	defer server.Close()
-
-	var outBuf, errBuf bytes.Buffer
-	runner := &Runner{
-		Client: NewClient(server.URL),
-		Out:    &outBuf,
-		Err:    &errBuf,
-	}
-
-	// 1. loom pair
-	err := runner.Execute(context.Background(), []string{"pair"})
-	if err != nil {
-		t.Fatalf("run pair: %v", err)
-	}
-	out := outBuf.String()
-	if !strings.Contains(out, "583-921") || !strings.Contains(out, "Ephemeral Device Pairing") {
-		t.Errorf("pair missing PIN or header: %s", out)
-	}
-
-	// 2. loom pair status
-	outBuf.Reset()
-	err = runner.Execute(context.Background(), []string{"pair", "status"})
-	if err != nil {
-		t.Fatalf("run pair status: %v", err)
-	}
-	out = outBuf.String()
-	if !strings.Contains(out, "583-921") {
-		t.Errorf("pair status missing PIN: %s", out)
-	}
-
-	// 3. loom pair join
-	outBuf.Reset()
-	err = runner.Execute(context.Background(), []string{"pair", "join", "583-921"})
-	if err != nil {
-		t.Fatalf("run pair join: %v", err)
-	}
-	out = outBuf.String()
-	if !strings.Contains(out, "Successfully paired") || !strings.Contains(out, "loom-test-net") {
-		t.Errorf("pair join missing success output: %s", out)
 	}
 }
 

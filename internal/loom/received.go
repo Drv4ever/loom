@@ -38,8 +38,22 @@ func (n *Node) loadReceived() error {
 				return fmt.Errorf("invalid received file record")
 			}
 		}
+		if err := validateManifest(nil, folder.Tombstones, nil); err != nil {
+			return err
+		}
 		folder.ID = id
-		folder.Path = filepath.Join(n.ReceiveDir, id)
+		if folder.Path == "" {
+			folder.Path = filepath.Join(n.ReceiveDir, id)
+		}
+		if !filepath.IsAbs(folder.Path) {
+			return fmt.Errorf("invalid received destination")
+		}
+		if folder.Status == "" {
+			folder.Status = "pending"
+		}
+		if folder.Mode == "" {
+			folder.Mode = modeTwoWay
+		}
 		n.received[id] = folder
 	}
 	return nil
@@ -99,6 +113,7 @@ func (n *Node) ReceivedFolders() []ReceivedFolder {
 	defer n.mu.RUnlock()
 	folders := make([]ReceivedFolder, 0, len(n.received))
 	for _, folder := range n.received {
+		folder.Tombstones = nil
 		folder.Files = append([]fileDescriptor{}, folder.Files...)
 		sort.Slice(folder.Files, func(i, j int) bool { return folder.Files[i].Path < folder.Files[j].Path })
 		folders = append(folders, folder)
@@ -123,17 +138,17 @@ func (a *App) handleReceivedFile(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	a.main.mu.RUnlock()
-	if !exists || !found {
+	if !exists || !found || (folder.Status != "" && folder.Status != "accepted" && folder.Status != "paused") {
 		writeError(w, http.StatusNotFound, "received file was not found")
 		return
 	}
-	root, err := os.OpenRoot(a.main.ReceiveDir)
+	root, err := os.OpenRoot(folder.Path)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "received folder is unavailable")
 		return
 	}
 	defer root.Close()
-	file, err := root.Open(filepath.Join(id, filepath.FromSlash(name)))
+	file, err := openSyncFile(root, name)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "received file is unavailable")
 		return

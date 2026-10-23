@@ -24,10 +24,8 @@ import {
   Wifi,
   WifiOff,
   X,
-  Zap,
   Ban,
   Unlock,
-  Key,
   Shield,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -48,8 +46,8 @@ import {
   type Device,
   type Folder as SharedFolder,
   type RelayInfo,
+  type ReceivedFolder,
   type Service,
-  type PairingSession,
   addRelay,
   deleteResource,
   getConflicts,
@@ -60,8 +58,6 @@ import {
   resolveConflict,
   blockDevice,
   unblockDevice,
-  generatePairingCode,
-  claimPairingCode,
 } from "@/lib/api"
 
 type PageKey =
@@ -87,6 +83,11 @@ const pageTitles: Record<PageKey, string> = {
 }
 
 export function LoomDashboard() {
+  const [accessService, setAccessService] = useState<Service | null>(null)
+  const [forwardService, setForwardService] = useState<Service | null>(null)
+  const [incomingFolder, setIncomingFolder] = useState<ReceivedFolder | null>(null)
+  const [trashFolder, setTrashFolder] = useState<{id: string; name: string} | null>(null)
+  const [serviceProtocol, setServiceProtocol] = useState("http")
   const [page, setPage] = useState<PageKey>("overview")
   const [dialog, setDialog] = useState<DialogKey>(null)
   const [conflictFolder, setConflictFolder] = useState<SharedFolder | null>(null)
@@ -396,6 +397,8 @@ export function LoomDashboard() {
               state={state}
               busyKey={busyKey}
               onAdd={() => openDialog("service")}
+              onAccess={(service) => {setActionError(""); setAccessService(service)}}
+              onForward={(service) => {setActionError(""); setForwardService(service)}}
               onRemove={(service) => {
                 if (
                   window.confirm(`Remove “${service.name}” from this network?`)
@@ -424,6 +427,9 @@ export function LoomDashboard() {
             <FoldersPage
               state={state}
               busyKey={busyKey}
+              onAccept={(folder) => {setActionError(""); setIncomingFolder(folder)}}
+              onRecovery={setTrashFolder}
+              onIncomingAction={(folder, action) => void runAction(`incoming-${folder.id}`, () => postJson(`/api/received/${encodeURIComponent(folder.id)}`, {action}), `Folder ${action === "resume" ? "resumed" : action === "pause" ? "paused" : "removed"}`)}
               onCopyPath={(path) => void copyText(path)}
               copiedPath={copiedAddress}
               onAdd={() => openDialog("folder")}
@@ -512,7 +518,7 @@ export function LoomDashboard() {
 
       <Dialog
         open={dialog === "device"}
-        title="Pair or Connect Device"
+        title="Connect a device"
         onClose={() => setDialog(null)}
         busy={busyKey === "dialog"}
         error={actionError}
@@ -527,11 +533,6 @@ export function LoomDashboard() {
             ).then((success) => {
               if (success) setDialog(null)
             })
-          }}
-          onClaimSuccess={(msg) => {
-            setDialog(null)
-            setNotice(msg)
-            void refresh()
           }}
           busy={busyKey === "dialog"}
           onCancel={() => setDialog(null)}
@@ -549,20 +550,15 @@ export function LoomDashboard() {
         <form
           onSubmit={(event) => {
             const data = new FormData(event.currentTarget)
-            const allowedStr = String(data.get("allowedPeers") || "").trim()
-            const allowedPeers = allowedStr
-              ? allowedStr
-                  .split(",")
-                  .map((s) => s.trim())
-                  .filter(Boolean)
-              : undefined
+            const allowedPeers = selectedPeers(data)
             void handleAction(
               event,
               () =>
                 postJson("/api/services", {
                   name: String(data.get("name") || "").trim(),
                   target: String(data.get("target") || "").trim(),
-                  trusted: data.get("trusted") === "on",
+                  protocol: serviceProtocol,
+                  trusted: serviceProtocol === "http" && data.get("trusted") === "on",
                   allowedPeers: allowedPeers,
                 }),
               "Service published"
@@ -581,6 +577,10 @@ export function LoomDashboard() {
             placeholder="Project preview"
             autoFocus
           />
+          <label className="field-label field-label-spaced" htmlFor="service-protocol">Protocol</label>
+          <select id="service-protocol" className="field-input" value={serviceProtocol} onChange={(event) => setServiceProtocol(event.target.value)}>
+            <option value="http">Web app (HTTP)</option><option value="tcp">TCP service</option>
+          </select>
           <label
             className="field-label field-label-spaced"
             htmlFor="service-target"
@@ -591,25 +591,10 @@ export function LoomDashboard() {
             className="field-input mono-input"
             id="service-target"
             name="target"
-            type="url"
             required
-            placeholder="http://127.0.0.1:3001"
+            placeholder={serviceProtocol === "tcp" ? "127.0.0.1:5432" : "http://127.0.0.1:3001"}
           />
-          <label
-            className="field-label field-label-spaced"
-            htmlFor="service-allow"
-          >
-            Access Control (Allowed Peer IDs)
-          </label>
-          <input
-            className="field-input mono-input"
-            id="service-allow"
-            name="allowedPeers"
-            placeholder="Optional comma-separated peer IDs (leave blank to allow all peers)"
-          />
-          <p className="field-help">
-            Only devices listed here will be granted access. All other peers receive HTTP 403 Forbidden.
-          </p>
+          <PeerAccessFields devices={state.devices} />
           <div style={{ marginTop: "1rem", display: "flex", alignItems: "flex-start", gap: "0.5rem" }}>
             <input
               type="checkbox"
@@ -655,7 +640,7 @@ export function LoomDashboard() {
                   name: String(data.get("name") || "").trim(),
                   path: String(data.get("path") || "").trim(),
                   peerId: String(data.get("peerId") || ""),
-                  readOnly: data.get("readOnly") === "on",
+                  mode: String(data.get("mode") || "two_way"),
                 }),
               "Folder added"
             )
@@ -687,8 +672,7 @@ export function LoomDashboard() {
             placeholder="/Users/you/Projects/assets"
           />
           <p className="field-help">
-            Enter an absolute path. Changes and deletions synchronize safely between
-            devices with automatic conflict detection, delta chunking, and soft-delete archives.
+            Enter an absolute path on this computer. Conflicting edits are saved for review; propagated deletions are archived on the device that applies them.
           </p>
           <label
             className="field-label field-label-spaced"
@@ -714,22 +698,12 @@ export function LoomDashboard() {
                 </option>
               ))}
           </select>
-          <div style={{ marginTop: "1rem", display: "flex", alignItems: "flex-start", gap: "0.5rem" }}>
-            <input
-              type="checkbox"
-              id="folder-readonly"
-              name="readOnly"
-              style={{ marginTop: "0.25rem" }}
-            />
-            <div>
-              <label htmlFor="folder-readonly" style={{ fontWeight: 600, fontSize: "0.875rem", cursor: "pointer", display: "block" }}>
-                Read-Only Sync
-              </label>
-              <p className="field-help" style={{ margin: "0.15rem 0 0 0" }}>
-                Send files out without allowing remote peers to overwrite or delete local files.
-              </p>
-            </div>
-          </div>
+          <label className="field-label field-label-spaced" htmlFor="folder-mode">Sync direction</label>
+          <select className="field-input" id="folder-mode" name="mode" defaultValue="two_way">
+            <option value="two_way">Two way — edits and deletions on both devices</option>
+            <option value="send_only">Send only — this folder is the source</option>
+          </select>
+          <p className="field-help">The other device must accept the folder and choose its destination before files transfer. Send only keeps this device’s files authoritative.</p>
           {state.devices.filter((device) => device.online && !device.self)
             .length === 0 && (
             <p className="field-help field-error">
@@ -781,6 +755,42 @@ export function LoomDashboard() {
         </div>
       </Dialog>
 
+      <Dialog open={Boolean(accessService)} title={`Access to ${accessService?.name || "service"}`} onClose={() => setAccessService(null)} busy={busyKey === "access"} error={actionError}>
+        {accessService && <form key={accessService.id} onSubmit={(event) => {
+          event.preventDefault()
+          const allowedPeers = selectedPeers(new FormData(event.currentTarget))
+          void runAction("access", () => postJson(`/api/services/${encodeURIComponent(accessService.id)}/access`, {allowedPeers}), "Service access updated").then((ok) => {if (ok) setAccessService(null)})
+        }}>
+          <PeerAccessFields devices={state.devices} selected={accessService.allowedPeers} />
+          <FormActions onCancel={() => setAccessService(null)} busy={busyKey === "access"} submitLabel="Save access" />
+        </form>}
+      </Dialog>
+      <Dialog open={Boolean(forwardService)} title={`Forward ${forwardService?.name || "TCP service"}`} onClose={() => setForwardService(null)} busy={busyKey === "forward"} error={actionError}>
+        {forwardService && <form onSubmit={(event) => {
+          event.preventDefault()
+          const localPort = Number(new FormData(event.currentTarget).get("port") || 0)
+          void runAction("forward", () => postJson("/api/forwards", {peerId: forwardService.deviceId, serviceId: forwardService.id, localPort}), "TCP forward started").then((ok) => {if (ok) setForwardService(null)})
+        }}>
+          <p className="field-help">Connect through this computer’s loopback port to {forwardService.name} on {forwardService.deviceName}.</p>
+          <label className="field-label" htmlFor="forward-port">Local port (0 chooses an available port)</label>
+          <input id="forward-port" className="field-input" name="port" type="number" min="0" max="65535" defaultValue="0" required />
+          <FormActions onCancel={() => setForwardService(null)} busy={busyKey === "forward"} submitLabel="Start forward" />
+        </form>}
+      </Dialog>
+      <Dialog open={Boolean(incomingFolder)} title={`Accept ${incomingFolder?.name || "folder"}`} onClose={() => setIncomingFolder(null)} busy={busyKey === "accept"} error={actionError}>
+        {incomingFolder && <form key={incomingFolder.id} onSubmit={(event) => {
+          event.preventDefault()
+          const path = String(new FormData(event.currentTarget).get("path") || "").trim()
+          void runAction("accept", () => postJson(`/api/received/${encodeURIComponent(incomingFolder.id)}`, {action: "accept", path}), "Folder accepted").then((ok) => {if (ok) setIncomingFolder(null)})
+        }}>
+          <p className="field-help">{incomingFolder.mode === "send_only" ? "This device receives changes from the source. Local edits may be replaced on the next sync." : "Edits and deletions in this folder will synchronize with the other device."}</p>
+          <label className="field-label" htmlFor="incoming-path">Destination on this device</label>
+          <input className="field-input mono-input" id="incoming-path" name="path" defaultValue={incomingFolder.path} required />
+          <p className="field-help">Keep the suggested managed destination, or enter an existing empty directory outside Loom’s data folder.</p>
+          <FormActions onCancel={() => setIncomingFolder(null)} busy={busyKey === "accept"} submitLabel="Accept folder" />
+        </form>}
+      </Dialog>
+      <RecoveryDialog folder={trashFolder} onClose={() => setTrashFolder(null)} onRestored={() => void refresh()} />
       <ConflictsDialog
         folder={conflictFolder}
         onClose={() => setConflictFolder(null)}
@@ -816,6 +826,14 @@ function Overview({
   const recentFolders = state.folders.slice(0, 3)
   return (
     <>
+      {(onlinePeers.length === 0 || state.services.length === 0 || (state.folders.length === 0 && !state.receivedFolders?.length)) && <section className="panel setup-checklist" aria-label="Getting started">
+        <strong>Set up your two-device workspace</strong>
+        <div>
+          <button className="text-button" onClick={onDevice}>{onlinePeers.length ? "✓ " : "1. "}Connect another device</button>
+          <button className="text-button" onClick={onService}>{state.services.length ? "✓ " : "2. "}Publish an app</button>
+          <button className="text-button" onClick={onFolder}>{state.folders.length || state.receivedFolders?.length ? "✓ " : "3. "}Share a folder</button>
+        </div>
+      </section>}
       <div className="stats-strip" aria-label="Network summary">
         <Stat
           icon={<Radio size={17} />}
@@ -850,7 +868,7 @@ function Overview({
                 className={`live-label ${state.network.connected ? "" : "is-paused"}`}
               >
                 <i />
-                {state.network.connected ? "Live" : "Paused"}
+                {state.network.connected ? (state.stats.onlineDevices > 1 ? "Connected" : "Waiting for another device") : "Paused"}
               </span>
             }
           />
@@ -994,337 +1012,19 @@ function Overview({
   )
 }
 
-function DevicePairingModalContent({
-  onConnectAddress,
-  onClaimSuccess,
-  busy,
-  onCancel,
-}: {
-  onConnectAddress: (address: string) => void
-  onClaimSuccess: (msg: string) => void
-  busy: boolean
-  onCancel: () => void
+function DevicePairingModalContent({onConnectAddress, busy, onCancel}: {
+  onConnectAddress: (address: string) => void; busy: boolean; onCancel: () => void
 }) {
-  const [tab, setTab] = useState<"pair" | "join" | "multiaddress">("pair")
-  const [session, setSession] = useState<PairingSession | null>(null)
-  const [generating, setGenerating] = useState(false)
-  const [error, setError] = useState("")
-  const [timeLeft, setTimeLeft] = useState<number>(0)
-  const [pinInput, setPinInput] = useState("")
-  const [relayInput, setRelayInput] = useState("")
-  const [joining, setJoining] = useState(false)
-
-  // Countdown timer for pairing session
-  useEffect(() => {
-    if (!session?.expiresAt) return
-    const update = () => {
-      const exp = new Date(session.expiresAt).getTime()
-      const diff = Math.max(0, Math.floor((exp - Date.now()) / 1000))
-      setTimeLeft(diff)
-      if (diff === 0) setSession(null)
-    }
-    update()
-    const interval = setInterval(update, 1000)
-    return () => clearInterval(interval)
-  }, [session])
-
-  const handleGenerate = async () => {
-    setGenerating(true)
-    setError("")
-    try {
-      const s = await generatePairingCode(600)
-      setSession(s)
-    } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to generate pairing PIN"
-      )
-    } finally {
-      setGenerating(false)
-    }
-  }
-
-  const handleJoin = async (e: FormEvent) => {
-    e.preventDefault()
-    if (!pinInput.trim()) return
-    setJoining(true)
-    setError("")
-    try {
-      const payload = await claimPairingCode(
-        pinInput.trim(),
-        relayInput.trim() || undefined
-      )
-      onClaimSuccess(`Paired successfully with network ${payload.networkId}!`)
-    } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Pairing failed. Check the PIN and relay address."
-      )
-    } finally {
-      setJoining(false)
-    }
-  }
-
-  const formatTimer = (secs: number) => {
-    const m = Math.floor(secs / 60)
-    const s = secs % 60
-    return `${m}:${s < 10 ? "0" : ""}${s}`
-  }
-
-  return (
-    <div>
-      <div
-        style={{
-          display: "flex",
-          gap: "0.5rem",
-          marginBottom: "1.25rem",
-          borderBottom: "1px solid var(--border, #333)",
-          paddingBottom: "0.75rem",
-        }}
-      >
-        <button
-          type="button"
-          className={`button ${tab === "pair" ? "button-primary" : "button-secondary"} button-sm`}
-          onClick={() => {
-            setTab("pair")
-            setError("")
-          }}
-        >
-          <Zap size={14} /> Pair this Device
-        </button>
-        <button
-          type="button"
-          className={`button ${tab === "join" ? "button-primary" : "button-secondary"} button-sm`}
-          onClick={() => {
-            setTab("join")
-            setError("")
-          }}
-        >
-          <Key size={14} /> Enter PIN to Join
-        </button>
-        <button
-          type="button"
-          className={`button ${tab === "multiaddress" ? "button-primary" : "button-secondary"} button-sm`}
-          onClick={() => {
-            setTab("multiaddress")
-            setError("")
-          }}
-        >
-          <Link2 size={14} /> Multiaddress
-        </button>
-      </div>
-
-      {error && (
-        <div
-          className="connection-warning"
-          role="alert"
-          style={{ marginBottom: "1rem" }}
-        >
-          <AlertTriangle size={16} /> {error}
-        </div>
-      )}
-
-      {tab === "pair" && (
-        <div>
-          <p className="field-help" style={{ marginBottom: "1rem" }}>
-            Generate a short-lived, encrypted 6-digit PIN. Another device can
-            pair instantly without manually copying 64-character private network
-            keys.
-          </p>
-
-          {!session ? (
-            <button
-              type="button"
-              className="button button-primary"
-              onClick={handleGenerate}
-              disabled={generating}
-              style={{
-                width: "100%",
-                justifyContent: "center",
-                padding: "0.75rem",
-              }}
-            >
-              {generating ? (
-                <LoaderCircle size={16} className="spin" />
-              ) : (
-                <Zap size={16} />
-              )}
-              Generate 6-Digit Pairing PIN
-            </button>
-          ) : (
-            <div
-              style={{
-                background: "var(--card-bg, #1e1e24)",
-                border: "1px solid var(--border-focus, #3b82f6)",
-                borderRadius: "8px",
-                padding: "1.25rem",
-                textAlign: "center",
-              }}
-            >
-              <div
-                style={{
-                  fontSize: "0.75rem",
-                  textTransform: "uppercase",
-                  letterSpacing: "0.1em",
-                  color: "#9ca3af",
-                  marginBottom: "0.5rem",
-                }}
-              >
-                Pairing PIN (Valid for 10 Minutes)
-              </div>
-              <div
-                style={{
-                  fontSize: "2.25rem",
-                  fontWeight: 700,
-                  letterSpacing: "0.2em",
-                  fontFamily: "monospace",
-                  color: "#38bdf8",
-                  margin: "0.5rem 0",
-                }}
-              >
-                {session.formatted}
-              </div>
-              <div
-                style={{
-                  fontSize: "0.85rem",
-                  color: timeLeft < 60 ? "#ef4444" : "#eab308",
-                  marginBottom: "1rem",
-                }}
-              >
-                Expires in {formatTimer(timeLeft)}
-              </div>
-              <p
-                className="field-help"
-                style={{ textAlign: "left", marginBottom: "0.5rem" }}
-              >
-                On the joining device, select{" "}
-                <strong>Enter PIN to Join</strong>, or run in terminal:
-              </p>
-              <div
-                style={{
-                  background: "#0d1117",
-                  padding: "0.5rem 0.75rem",
-                  borderRadius: "6px",
-                  fontFamily: "monospace",
-                  fontSize: "0.85rem",
-                  textAlign: "left",
-                  color: "#e6edf3",
-                  marginBottom: "1rem",
-                  overflowX: "auto",
-                }}
-              >
-                loom pair join {session.formatted}
-              </div>
-              <button
-                type="button"
-                className="button button-secondary button-sm"
-                onClick={handleGenerate}
-                disabled={generating}
-              >
-                <RefreshCw size={14} /> Generate new PIN
-              </button>
-            </div>
-          )}
-          <div
-            style={{
-              marginTop: "1.5rem",
-              display: "flex",
-              justifyContent: "flex-end",
-            }}
-          >
-            <button
-              type="button"
-              className="button button-secondary"
-              onClick={onCancel}
-            >
-              Done
-            </button>
-          </div>
-        </div>
-      )}
-
-      {tab === "join" && (
-        <form onSubmit={handleJoin}>
-          <label className="field-label" htmlFor="pairing-pin-input">
-            6-Digit Pairing PIN
-          </label>
-          <input
-            className="field-input mono-input"
-            id="pairing-pin-input"
-            value={pinInput}
-            onChange={(e) => setPinInput(e.target.value)}
-            required
-            maxLength={7}
-            placeholder="123-456"
-            autoFocus
-            style={{
-              fontSize: "1.25rem",
-              letterSpacing: "0.15em",
-              textAlign: "center",
-            }}
-          />
-          <p className="field-help">
-            Enter the 6-digit PIN displayed on the authorizer device.
-          </p>
-
-          <label
-            className="field-label field-label-spaced"
-            htmlFor="pairing-relay-input"
-          >
-            Relay Multiaddress (Optional)
-          </label>
-          <input
-            className="field-input mono-input"
-            id="pairing-relay-input"
-            value={relayInput}
-            onChange={(e) => setRelayInput(e.target.value)}
-            placeholder="/ip4/203.0.113.10/tcp/4001/p2p/..."
-          />
-          <p className="field-help">
-            Leave blank if both devices share a configured relay or local network.
-          </p>
-
-          <FormActions
-            onCancel={onCancel}
-            busy={joining}
-            submitLabel="Pair & Connect"
-          />
-        </form>
-      )}
-
-      {tab === "multiaddress" && (
-        <form
-          onSubmit={(event) => {
-            event.preventDefault()
-            const data = new FormData(event.currentTarget)
-            const addr = String(data.get("address") || "").trim()
-            if (addr) onConnectAddress(addr)
-          }}
-        >
-          <label className="field-label" htmlFor="device-address">
-            Direct Multiaddress
-          </label>
-          <input
-            className="field-input mono-input"
-            id="device-address"
-            name="address"
-            required
-            placeholder="/ip4/192.168.1.20/tcp/4001/p2p/…"
-            autoFocus
-          />
-          <p className="field-help">
-            Paste the device’s full libp2p multiaddress. Both devices must share
-            the same network key.
-          </p>
-          <FormActions
-            onCancel={onCancel}
-            busy={busy}
-            submitLabel="Connect device"
-          />
-        </form>
-      )}
-    </div>
-  )
+  return <form onSubmit={(event) => {
+    event.preventDefault()
+    onConnectAddress(String(new FormData(event.currentTarget).get("address") || "").trim())
+  }}>
+    <p className="field-help">Start both devices with the same private network key file. On the same Wi-Fi they discover each other automatically; otherwise paste the other device’s address below.</p>
+    <label className="field-label" htmlFor="device-address">Device address</label>
+    <input className="field-input mono-input" id="device-address" name="address" required autoFocus placeholder="/ip4/192.168.1.20/tcp/4001/p2p/…" />
+    <p className="field-help">Copy the full address from the other device’s Devices page.</p>
+    <FormActions onCancel={onCancel} busy={busy} submitLabel="Connect device" />
+  </form>
 }
 
 function DevicesPage({
@@ -1355,7 +1055,7 @@ function DevicesPage({
               className={`live-label ${state.network.connected ? "" : "is-paused"}`}
             >
               <i />
-              {state.network.connected ? "Live" : "Paused"}
+              {state.network.connected ? (state.stats.onlineDevices > 1 ? "Connected" : "Waiting for another device") : "Paused"}
             </span>
           }
         />
@@ -1486,10 +1186,14 @@ function ServicesPage({
   onAdd,
   onRemove,
   onStopForward,
+  onAccess,
+  onForward,
 }: {
   state: AppState
   busyKey: string
   onAdd: () => void
+  onAccess: (service: Service) => void
+  onForward: (service: Service) => void
   onRemove: (service: Service) => void
   onStopForward?: (id: string) => void
 }) {
@@ -1559,16 +1263,12 @@ function ServicesPage({
                       </td>
                       <td>
                         <div className="row-actions">
-                          <a
-                            className="icon-action"
-                            href={service.url}
-                            target="_blank"
-                            rel="noreferrer"
-                            aria-label={`Open ${service.name}`}
-                            title="Open service"
-                          >
-                            <ArrowUpRight size={16} />
-                          </a>
+                          {service.protocol === "http" ? <a
+                            className="icon-action" href={service.status === "available" ? service.url : undefined}
+                            target="_blank" rel="noreferrer" aria-disabled={service.status !== "available"}
+                            aria-label={`Open ${service.name}`} title="Open service"><ArrowUpRight size={16} /></a>
+                          : !locallyOwned && <button className="icon-action" onClick={() => onForward(service)} disabled={service.status !== "available"} aria-label={`Forward ${service.name}`} title="Create TCP forward"><Link2 size={16} /></button>}
+                          {locallyOwned && <button className="icon-action" onClick={() => onAccess(service)} aria-label={`Edit access to ${service.name}`} title="Edit access"><Shield size={16} /></button>}
                           {locallyOwned && (
                             <button
                               className="icon-action danger-action"
@@ -1668,7 +1368,7 @@ function ServicesPage({
           <EmptyBlock
             icon={<Network size={20} />}
             title="No active TCP port forwards"
-            detail="Forward local TCP ports directly to remote peers and services using: loom forward <peer>:<port>"
+            detail="Publish a TCP service on the other device, then choose its forward action above."
           />
         )}
       </section>
@@ -1686,6 +1386,9 @@ function FoldersPage({
   onCopyPath,
   copiedPath,
   onReviewConflicts,
+  onAccept,
+  onIncomingAction,
+  onRecovery,
 }: {
   state: AppState
   busyKey: string
@@ -1696,11 +1399,14 @@ function FoldersPage({
   onCopyPath: (path: string) => void
   copiedPath: string
   onReviewConflicts: (folder: SharedFolder) => void
+  onAccept: (folder: ReceivedFolder) => void
+  onIncomingAction: (folder: ReceivedFolder, action: string) => void
+  onRecovery: (folder: {id: string; name: string}) => void
 }) {
   return (
     <div className="folder-panels">
       <section className="panel data-panel">
-        <PanelHeader title="Sending folders" icon={<FolderSync size={17} />} />
+        <PanelHeader title="Shared folders" icon={<FolderSync size={17} />} />
         {state.folders.length ? (
           <div className="table-scroll">
             <table>
@@ -1724,6 +1430,8 @@ function FoldersPage({
                         </span>
                         <span>
                           <strong>{folder.name}</strong>
+                          <small>{folder.mode === "send_only" || ("readOnly" in folder && folder.readOnly) ? "Send only" : "Two way"}</small>
+                          {"remotePath" in folder && folder.remotePath && <small className="mono-cell">Other device: {String(folder.remotePath)}</small>}
                           <small className="mono-cell" title={folder.path}>
                             {folder.path}
                           </small>
@@ -1772,6 +1480,7 @@ function FoldersPage({
                     <td>{formatRelativeTime(folder.lastSync)}</td>
                     <td>
                       <div className="row-actions">
+                        <button className="icon-action" title="Recover deleted files" aria-label={`Recover files in ${folder.name}`} onClick={() => onRecovery(folder)}><FileClock size={16} /></button>
                         <button
                           className="icon-action"
                           onClick={() => onSync(folder)}
@@ -1835,7 +1544,7 @@ function FoldersPage({
         )}
       </section>
       <section className="panel data-panel">
-        <PanelHeader title="Received folders" icon={<Folder size={17} />} />
+        <PanelHeader title="Incoming shares" icon={<Folder size={17} />} />
         {state.receivedFolders?.length ? (
           <div className="table-scroll">
             <table>
@@ -1844,7 +1553,7 @@ function FoldersPage({
                   <th>Folder and local path</th>
                   <th>From device</th>
                   <th>Files</th>
-                  <th>Last received</th>
+                  <th>Status / actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -1898,7 +1607,19 @@ function FoldersPage({
                         </ul>
                       </details>
                     </td>
-                    <td>{formatRelativeTime(folder.lastReceived)}</td>
+                    <td>
+                      <StatusLabel status={folder.status} />
+                      <small className="incoming-share-detail muted-cell">{folder.mode === "send_only" ? "Receive only" : "Two way"} · {formatRelativeTime(folder.lastReceived)}</small>
+                      <div className="row-actions">
+                        {(folder.status === "pending" || folder.status === "declined") && <button className="text-button" onClick={() => onAccept(folder)}>Accept…</button>}
+                        {folder.status === "pending" && <button className="text-button" disabled={busyKey === `incoming-${folder.id}`} onClick={() => onIncomingAction(folder, "decline")}>Decline</button>}
+                        {(folder.status === "accepted" || folder.status === "paused") && <>
+                          <button className="text-button" disabled={busyKey === `incoming-${folder.id}`} onClick={() => onIncomingAction(folder, folder.status === "paused" ? "resume" : "pause")}>{folder.status === "paused" ? "Resume" : "Pause"}</button>
+                          <button className="text-button" onClick={() => onRecovery(folder)}>Recover files</button>
+                          <button className="text-button" disabled={busyKey === `incoming-${folder.id}`} onClick={() => onIncomingAction(folder, "remove")}>Remove share</button>
+                        </>}
+                      </div>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -1908,7 +1629,7 @@ function FoldersPage({
           <EmptyBlock
             icon={<Folder size={20} />}
             title="No files received yet"
-            detail="On the other computer, add a source folder and select this device. Received files and their local path will appear here automatically."
+            detail="Share a folder from the other device. Its invitation appears here for you to accept and choose a destination."
           />
         )}
       </section>
@@ -1955,7 +1676,7 @@ function SettingsPage({
   const loadRelays = useCallback(async () => {
     try {
       const data = await getRelays()
-      setRelays(data || [])
+      setRelays(data)
     } catch {
       // ignore
     }
@@ -2408,15 +2129,15 @@ function ServiceList({
             </small>
           </span>
           <StatusLabel status={service.status} />
-          <a
+          {service.protocol === "http" && <a
             className="icon-action quiet-list-action"
-            href={service.url}
+            href={service.status === "available" ? service.url : undefined}
             target="_blank"
             rel="noreferrer"
             aria-label={`Open ${service.name}`}
           >
             <ArrowUpRight size={15} />
-          </a>
+          </a>}
         </div>
       ))}
     </div>
@@ -2458,7 +2179,7 @@ function FolderList({
               <button
                 type="button"
                 className="conflict-badge-btn"
-                onClick={() => onReviewConflicts(folder)}
+                onClick={() => onReviewConflicts?.(folder)}
                 title="Review and resolve conflicts"
               >
                 <AlertTriangle size={11} />
@@ -2664,6 +2385,8 @@ function EmptyBlock({
 function StatusLabel({ status }: { status: string }) {
   const normal = status.toLowerCase()
   const good = [
+    "available",
+    "accepted",
     "healthy",
     "synced",
     "online",
@@ -2839,7 +2562,7 @@ function ConflictsDialog({
     setError("")
     try {
       const list = await getConflicts(folder.id)
-      setConflicts(list || [])
+      setConflicts(list)
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load conflicts")
     } finally {
@@ -3063,4 +2786,64 @@ function formatRelativeTime(value: string) {
   if (seconds < 3600) return `${Math.floor(seconds / 60)} min ago`
   if (seconds < 86400) return `${Math.floor(seconds / 3600)} hr ago`
   return `${Math.floor(seconds / 86400)} days ago`
+}
+
+function selectedPeers(data: FormData): string[] {
+  return data.get("access") === "selected" ? data.getAll("allowedPeers").map(String) : []
+}
+
+function PeerAccessFields({devices, selected = []}: {devices: Device[]; selected?: string[]}) {
+  const [all, setAll] = useState(selected.length === 0)
+  const [checked, setChecked] = useState(selected)
+  const peers = devices.filter((device) => !device.self)
+  const ids = new Set(peers.map((device) => device.id))
+  const choices = [...peers.map((device) => ({id: device.id, name: device.name, online: device.online})), ...selected.filter((id) => !ids.has(id)).map((id) => ({id, name: `Device ${id.slice(-8)}`, online: false}))]
+  return <fieldset className="peer-access-fields">
+    <legend className="field-label">Who can access this service?</legend>
+    <label><input type="radio" name="access" value="all" checked={all} onChange={() => setAll(true)} /> All devices in this private network</label>
+    <label><input type="radio" name="access" value="selected" checked={!all} disabled={!choices.length} onChange={() => setAll(false)} /> Selected devices</label>
+    {!choices.length && <p className="field-help">Connect another device to choose specific devices.</p>}
+    {!all && choices.map((device, index) => <label key={device.id}>
+      <input type="checkbox" name="allowedPeers" value={device.id} checked={checked.includes(device.id)} required={index === 0 && checked.length === 0} onChange={(event) => setChecked((previous) => event.target.checked ? [...previous, device.id] : previous.filter((id) => id !== device.id))} />
+      {device.name}{!device.online && " (offline)"}
+    </label>)}
+  </fieldset>
+}
+
+type ArchivedFile = {id: string; originalPath: string; size: number; deletedAt: string}
+
+function RecoveryDialog({folder, onClose, onRestored}: {folder: {id: string; name: string} | null; onClose: () => void; onRestored: () => void}) {
+  const [entries, setEntries] = useState<ArchivedFile[]>([])
+  const [loading, setLoading] = useState(false)
+  const [busy, setBusy] = useState("")
+  const [error, setError] = useState("")
+  useEffect(() => {
+    if (!folder) return
+    const controller = new AbortController()
+    setLoading(true)
+    setError("")
+    void requestJson<ArchivedFile[]>(`/api/folders/${encodeURIComponent(folder.id)}/trash`, {signal: controller.signal})
+      .then((files) => {if (!controller.signal.aborted) setEntries(files)})
+      .catch((err: unknown) => {if (!controller.signal.aborted) setError(err instanceof Error ? err.message : "Could not load deleted files")})
+      .finally(() => {if (!controller.signal.aborted) setLoading(false)})
+    return () => controller.abort()
+  }, [folder])
+  const restore = async (entry: ArchivedFile) => {
+    if (!folder) return
+    setBusy(entry.id)
+    setError("")
+    try {
+      await postJson(`/api/folders/${encodeURIComponent(folder.id)}/restore`, {id: entry.id})
+      setEntries((previous) => previous.filter((file) => file.id !== entry.id))
+      onRestored()
+    } catch (err) {setError(err instanceof Error ? err.message : "Restore failed")}
+    finally {setBusy("")}
+  }
+  return <Dialog open={Boolean(folder)} title={`Recover files: ${folder?.name || "folder"}`} onClose={onClose} busy={Boolean(busy)} error={error}>
+    <p className="field-help">Files archived when this device applied a deletion can be restored here. Restore preserves existing files and the recovered file joins the next sync.</p>
+    {loading ? <p>Loading deleted files…</p> : entries.length ? <ul className="recovery-list">{entries.map((entry) => <li key={entry.id}>
+      <span><strong>{entry.originalPath}</strong><small>{formatBytes(entry.size)} · {formatRelativeTime(entry.deletedAt)}</small></span>
+      <button type="button" className="button button-secondary" disabled={Boolean(busy)} onClick={() => void restore(entry)}>{busy === entry.id ? "Restoring…" : "Restore"}</button>
+    </li>)}</ul> : !error && <p>No deleted files in this device’s archive.</p>}
+  </Dialog>
 }

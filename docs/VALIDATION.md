@@ -1,44 +1,32 @@
-# Demo validation
+# Validation
 
-Verified locally on macOS/arm64 on 16 October 2026 using Go 1.27 and Bun 1.4.2. Implementation was split between Luna agents at max reasoning, then reviewed and exercised independently by the parent agent. The current implementation is an application mesh; the larger original PLAN.md remains a future product direction.
+Updated 2026-10-23 for the review fixes and two-device demo. The [earlier validation](archive/PRE-FIX-VALIDATION.md) is archived as historical context.
 
 ## Automated checks
 
-All passed on the final implementation:
+- `make check`: Go tests and vet; frontend TypeScript and lint; one-device API smoke; two-process peer smoke.
+- `go test -race ./internal/loom ./internal/cli`: race-enabled backend and CLI suite.
+- `make build`: backend executable and production frontend.
+- `git diff --check`: whitespace/error check.
 
-```sh
-make check
-go test -race ./cmd/... ./internal/...
-make build
-git diff --check
-```
+The Go regressions cover repeated conflicts without overwrite or duplicate copies, serialized restart state, older incorrectly advanced baselines, Keep Local/Remote/Both propagation, unresolved-path deletion, receiver deletion over multiple cycles and a real node restart, send-only protection, restore/recreation, receiver consent, managed and custom destinations, changing a destination without deleting the source, pause/decline, and sender ownership.
 
-`make check` runs Go tests/vet, frontend type checking/lint, a real three-node relay demo smoke test, and a separate-process normal-mode peer smoke test.
+Protocol tests exercise traversal, destination symlinks, unrequested downloads, corrupt file bytes, malformed chunk lengths, published TCP permission/protocol checks, working TCP echo forwarding, and termination of existing sessions when a forward stops. Existing HTTP proxy, ACL, private-network, relay, chunk, ignore, persistence, and CLI tests remain in the suite.
 
-Coverage includes incompatible network keys, connection rejection while paused, checksums and version preservation, safe retry after failed transfer, path traversal and symlink rejection, private-key file permissions, same-origin API protection, proxy sandbox headers, empty collection responses, persisted pause state, relay reconnects, real HTTP proxying, and exact received file contents.
+The API smoke uses one real daemon and a real local HTTP fixture. It checks empty first-run state, approved service access, service availability changes, invalid external targets, disabled PIN/raw TCP paths, host/origin checks, key-free diagnostics, and identity/network/publication persistence.
 
-The normal-mode test verifies persisted device identity and published services across peer restart, followed by another successful folder transfer. LAN discovery was observed in independent runs and after restart. One final concurrent-check run used the documented multiaddress fallback for its initial connection; multicast discovery can depend on the local network environment.
+The peer smoke uses two independent real daemon processes with separate identities and a random shared key. It verifies HTTP proxying, explicit invitation acceptance, a custom receive directory, file hashes/downloads, sharing from either device, receiver edits and deletions in the same share, remembered offline services, restart persistence, and new nested binary files after restarting the sender. The final full check used mDNS for initial discovery and restart reconnections. Earlier runs exercised the advertised-address fallback when initial mDNS was not detected. The test reports fallback separately rather than treating it as mDNS success.
 
-## Browser and launcher checks
+## Launcher and browser checks
 
-- Reviewed the live dashboard at narrow and desktop widths, with keyboard focus, loading, API-unavailable, dialog validation, and published-service ownership states.
-- Opened a real HTTP service through the circuit relay and published another service through the UI; invalid non-loopback targets produced a useful error.
-- Changed a sample file through the UI, then independently compared every source/received file byte-for-byte on disk.
-- Paused networking through the UI, confirmed actual service access returned 503, resumed networking, and confirmed the Linux peer still used the circuit relay.
-- Ran the exact `make demo` launcher. Stopped its shell, verified both owned child processes exited, and relaunched immediately on the same ports.
-- Restarted with networking and folder sync paused and an unsent source change present. Startup retained both pauses and did not transfer the file. Resuming networking alone left it unsent; resuming the folder delivered the exact bytes.
-- Kept the application running beyond the original two-minute relay failure and verified the relay still served real HTTP responses.
+Started `scripts/demo.sh` with isolated data. It built and started one backend plus the dashboard, advertised a real device, and used no removed demo flags or endpoints.
 
-## Review fixes
+In the browser, checked the lone-device setup checklist and waiting status; accepted an incoming folder into an existing custom directory; published a service with a named-device grant; opened the existing service's access editor and verified its saved selection; and restored an archived file from the incoming share's recovery dialog. The restored file rejoined synchronization. Local service availability and incoming folder paths were visible in the dashboard.
 
-Review identified and fixed a manifest retry bug that could mark a failed file as delivered; incorrect self-dialing in the demo service proxy; missing relay reconnects; pause/restart failures; unsorted device state that made topology nodes jump; incomplete checksum/header handling; and UI feedback/focus issues. Regression tests cover the material networking and file-handling fixes.
+## Practical boundaries
 
-## Scope to present accurately
+The automated two-process test does not validate two physical laptops' Wi-Fi, firewalls, or operating-system local-network permissions. Rehearse the [two-computer walkthrough](TWO-COMPUTER-DEMO.md) on the presentation network. A direct advertised LAN address is the discovery fallback.
 
-- This provides selected HTTP-service access and one-way folder replication over encrypted libp2p connections. It does not install a VPN adapter or route arbitrary operating-system traffic.
-- The three named demo peers are real libp2p hosts inside one Go process, not physical remote machines. Normal mode runs one peer per application instance.
-- Folder sync transfers changed regular files, retains replaced receiver versions, and does not propagate deletions. It is not collaborative editing or a full backup product. Limits are 100 MiB per file and 1 GiB per scanned folder.
-- HTTP proxying is bounded and sandboxed. It does not promise arbitrary authenticated web apps, WebSockets, transparent absolute asset paths, or general TCP/UDP forwarding.
-- Devices sharing the network key are trusted members. There is no hosted account service, per-user ACL system, public relay fleet, or general Internet NAT-traversal guarantee. The demo includes a working private circuit relay; normal-device connectivity depends on reachable peer addresses and LAN discovery.
+Use the same build on both devices: the sync protocol is now `/loom/sync/3.0.0` and application nodes reject the legacy transfer protocol. Existing incoming folders from versions without consent need acceptance again. Keep identities and key files distinct from source folders.
 
-Run `make demo` and use [the walkthrough](DEMO.md) for the short presentation. The default dashboard is http://127.0.0.1:3000.
+PIN enrollment is disabled. HTTP availability is a bounded HEAD request and TCP availability is a connection probe; these cannot guarantee all app routes or future requests. Symlinks and empty directories are skipped; limits are 100 MiB/file, 1 GiB/scan, and 10,000 files. Deletion archives cover deletions applied by Loom, not files already removed directly by the user, and expiry is not automatically scheduled. In send-only mode the source remains authoritative, including after a receiver restores a file.

@@ -32,6 +32,8 @@ func (a *App) Handler(apiListen string) http.Handler {
 	mux.HandleFunc("GET /api/state", a.handleState)
 	mux.HandleFunc("GET /api/received/{id}/files/{path...}", a.handleReceivedFile)
 	mux.HandleFunc("POST /api/peers", a.handleJoin)
+	mux.HandleFunc("POST /api/received/{id}", a.handleIncomingFolder)
+	mux.HandleFunc("POST /api/folders/{id}/restore", a.handleRestoreTrash)
 	mux.HandleFunc("POST /api/pairing/generate", a.handlePairingGenerate)
 	mux.HandleFunc("GET /api/pairing", a.handlePairingStatus)
 	mux.HandleFunc("POST /api/pairing/claim", a.handlePairingClaim)
@@ -40,6 +42,7 @@ func (a *App) Handler(apiListen string) http.Handler {
 	mux.HandleFunc("POST /api/devices/{id}/unblock", a.handleUnblockDevice)
 	mux.HandleFunc("POST /api/services", a.handleAddService)
 	mux.HandleFunc("DELETE /api/services/{id}", a.handleDeleteService)
+	mux.HandleFunc("POST /api/services/{id}/access", a.handleServiceAccess)
 	mux.HandleFunc("POST /api/folders", a.handleAddFolder)
 	mux.HandleFunc("POST /api/folders/{id}/sync", a.handleSyncFolder)
 	mux.HandleFunc("POST /api/folders/{id}/pause", a.handlePauseFolder)
@@ -146,6 +149,7 @@ func (a *App) handleJoin(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleAddService(w http.ResponseWriter, r *http.Request) {
 	var body struct {
+		Protocol     string   `json:"protocol"`
 		Name         string   `json:"name"`
 		Target       string   `json:"target"`
 		Trusted      bool     `json:"trusted"`
@@ -159,8 +163,11 @@ func (a *App) handleAddService(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "service name is required and must be under 120 characters")
 		return
 	}
-	if _, err := validateLoopbackHTTPURL(body.Target); err != nil {
-		writeError(w, http.StatusBadRequest, "target must be an HTTP URL using localhost or a loopback IP")
+	if body.Protocol == "" {
+		body.Protocol = "http"
+	}
+	if err := validateService(ServiceRecord{Protocol: body.Protocol, Target: body.Target, AllowedPeers: body.AllowedPeers}); err != nil {
+		writeError(w, 400, err.Error())
 		return
 	}
 	id, err := randomSuffix()
@@ -169,12 +176,14 @@ func (a *App) handleAddService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	record := ServiceRecord{
+		Protocol:     body.Protocol,
 		ID:           id,
 		Name:         body.Name,
-		Target:       strings.TrimRight(body.Target, "/"),
+		Target:       normalizeServiceTarget(body.Protocol, body.Target),
 		Trusted:      body.Trusted,
 		AllowedPeers: body.AllowedPeers,
 	}
+	record.Status = probeService(r.Context(), record)
 	a.mu.Lock()
 	if !a.connected {
 		a.mu.Unlock()
@@ -224,11 +233,19 @@ func (a *App) handleAddFolder(w http.ResponseWriter, r *http.Request) {
 		PeerID       string   `json:"peerId"`
 		Name         string   `json:"name"`
 		AllowedPeers []string `json:"allowedPeers,omitempty"`
+		Mode         string   `json:"mode"`
 		ReadOnly     bool     `json:"readOnly,omitempty"`
 	}
 	if err := decodeBody(w, r, &body, 32<<10); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	if body.Mode != "" && body.Mode != modeTwoWay && body.Mode != modeSendOnly {
+		writeError(w, 400, "mode must be two_way or send_only")
+		return
+	}
+	if body.Mode == modeSendOnly {
+		body.ReadOnly = true
 	}
 	folder, err := a.addFolderWithOptions(body.Path, body.PeerID, body.Name, body.AllowedPeers, body.ReadOnly)
 	if err != nil {
@@ -311,31 +328,52 @@ func (a *App) handleResolveConflict(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a.mu.RLock()
-	entry := a.folders[id]
-	a.mu.RUnlock()
-	if entry == nil {
-		writeError(w, http.StatusNotFound, "folder not found")
-		return
-	}
-
-	if err := a.main.conflicts.Resolve(entry.Folder.Path, id, body.ConflictID, res); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
 	a.mu.Lock()
-	if current := a.folders[id]; current != nil {
-		current.Folder.Conflicts = len(a.main.conflicts.List(id))
-		_ = a.persistLocked()
+	entry := a.folders[id]
+	if entry == nil {
+		a.mu.Unlock()
+		writeError(w, 404, "folder not found")
+		return
 	}
+	if entry.syncing {
+		a.mu.Unlock()
+		writeMutationError(w, errFolderBusy)
+		return
+	}
+	c, ok := a.main.conflicts.Get(id, body.ConflictID)
+	if !ok {
+		a.mu.Unlock()
+		writeError(w, 404, "conflict not found")
+		return
+	}
+	if err := a.main.conflicts.Resolve(entry.Folder.Path, id, body.ConflictID, res); err != nil {
+		a.mu.Unlock()
+		writeMutationError(w, err)
+		return
+	}
+	// The saved remote hash is the expected counterpart for the user's chosen value.
+	// If it changes again, reconciliation produces a new conflict instead of overwriting it.
+	if entry.manifest == nil {
+		entry.manifest = make(map[string]string)
+	}
+	entry.manifest[c.Path] = c.RemoteSHA256
+	entry.Folder.Conflicts = len(a.main.conflicts.List(id))
+	err := a.persistLocked()
 	a.mu.Unlock()
+	if err != nil {
+		writeError(w, 500, "could not save resolution")
+		return
+	}
 
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 func (a *App) handleGetTrash(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	if _, err := a.localFolderPath(id); err != nil {
+		writeMutationError(w, err)
+		return
+	}
 	if a.main == nil || a.main.trash == nil {
 		writeJSON(w, http.StatusOK, []TrashEntry{})
 		return
@@ -472,6 +510,10 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	if !found {
 		writeError(w, http.StatusNotFound, "published service was not found")
+		return
+	}
+	if serviceProtocol(record) != "http" {
+		writeError(w, 400, "use a TCP forward for this service")
 		return
 	}
 	if isWebSocketUpgrade(r) {
@@ -952,56 +994,14 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
 
-func (a *App) handlePairingGenerate(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		DurationSeconds int `json:"durationSeconds,omitempty"`
-	}
-	if r.Body != nil {
-		_ = decodeBody(w, r, &body, 16<<10)
-	}
-	ttl := 10 * time.Minute
-	if body.DurationSeconds > 0 {
-		ttl = time.Duration(body.DurationSeconds) * time.Second
-	}
-	session, err := a.GeneratePairingCode(ttl)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, session)
+func (a *App) handlePairingGenerate(w http.ResponseWriter, _ *http.Request) {
+	writeError(w, http.StatusNotImplemented, errPINPairingUnavailable.Error())
 }
-
 func (a *App) handlePairingStatus(w http.ResponseWriter, _ *http.Request) {
-	session := a.GetPairingSession()
-	if session == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"active": false})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"active":  true,
-		"session": session,
-	})
+	writeJSON(w, 200, map[string]any{"active": false, "available": false, "reason": errPINPairingUnavailable.Error()})
 }
-
-func (a *App) handlePairingClaim(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		PIN   string `json:"pin"`
-		Relay string `json:"relay,omitempty"`
-	}
-	if err := decodeBody(w, r, &body, 16<<10); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if body.PIN == "" {
-		writeError(w, http.StatusBadRequest, "pairing PIN is required")
-		return
-	}
-	payload, err := a.ClaimPairingCode(body.PIN, body.Relay)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, payload)
+func (a *App) handlePairingClaim(w http.ResponseWriter, _ *http.Request) {
+	writeError(w, http.StatusNotImplemented, errPINPairingUnavailable.Error())
 }
 
 func (a *App) handleListBlockedDevices(w http.ResponseWriter, _ *http.Request) {

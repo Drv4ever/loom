@@ -29,8 +29,9 @@ type TCPForwardHandshake struct {
 
 // TCPForwardResponse is sent back by the responder before bidirectional raw streaming starts.
 type TCPForwardResponse struct {
-	OK    bool   `json:"ok"`
-	Error string `json:"error,omitempty"`
+	Target string `json:"target,omitempty"`
+	OK     bool   `json:"ok"`
+	Error  string `json:"error,omitempty"`
 }
 
 // Forward represents an active local port-forwarding listener.
@@ -68,6 +69,12 @@ func NewForwardManager(node *Node, getPeer func(id string) (string, bool)) *Forw
 
 // StartForward binds a local TCP port and tunnels inbound connections through a libp2p stream to the peer.
 func (fm *ForwardManager) StartForward(peerIDStr, serviceID, target string, requestedPort int) (*Forward, error) {
+	if serviceID == "" || target != "" {
+		return nil, errors.New("select an explicitly published TCP service; raw targets are not allowed")
+	}
+	if requestedPort < 0 || requestedPort > 65535 {
+		return nil, errors.New("local port must be between 0 and 65535")
+	}
 	if fm.node == nil {
 		return nil, errors.New("node is not initialized")
 	}
@@ -76,6 +83,35 @@ func (fm *ForwardManager) StartForward(peerIDStr, serviceID, target string, requ
 		return nil, fmt.Errorf("invalid peer id: %w", err)
 	}
 
+	if !fm.node.enabled.Load() {
+		return nil, errNetworkPaused
+	}
+	if fm.getPeer != nil {
+		if _, online := fm.getPeer(peerIDStr); !online {
+			return nil, errors.New("selected device is offline")
+		}
+	}
+	// Confirm the peer's publication and permission before reporting success.
+	checkCtx, checkCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	check, err := fm.node.Host.NewStream(network.WithAllowLimitedConn(checkCtx, "loom TCP forward check"), targetPeerID, tcpForwardProtocol)
+	if err != nil {
+		checkCancel()
+		return nil, err
+	}
+	_ = check.SetDeadline(time.Now().Add(8 * time.Second))
+	err = writeLengthPrefixedJSON(check, TCPForwardHandshake{ServiceID: serviceID})
+	var response TCPForwardResponse
+	if err == nil {
+		err = readLengthPrefixedJSON(check, &response, 4<<10)
+	}
+	_ = check.Close()
+	checkCancel()
+	if err != nil {
+		return nil, err
+	}
+	if !response.OK {
+		return nil, errors.New(response.Error)
+	}
 	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", requestedPort))
 	if err != nil {
 		return nil, fmt.Errorf("bind local port %d: %w", requestedPort, err)
@@ -101,7 +137,7 @@ func (fm *ForwardManager) StartForward(peerIDStr, serviceID, target string, requ
 		PeerID:    peerIDStr,
 		PeerName:  peerName,
 		ServiceID: serviceID,
-		Target:    target,
+		Target:    response.Target,
 		LocalPort: allocatedPort,
 		Status:    "active",
 		listener:  listener,
@@ -157,10 +193,13 @@ func (fm *ForwardManager) handleClientConnection(fwd *Forward, targetPeer peer.I
 		return
 	}
 	defer stream.Close()
+	stop := context.AfterFunc(fwd.ctx, func() { _ = clientConn.Close(); _ = stream.Reset() })
+	defer stop()
+	_ = stream.SetDeadline(time.Now().Add(10 * time.Second))
 
 	handshake := TCPForwardHandshake{
 		ServiceID: fwd.ServiceID,
-		Target:    fwd.Target,
+		Target:    "",
 	}
 	if err := writeLengthPrefixedJSON(stream, handshake); err != nil {
 		return
@@ -171,6 +210,7 @@ func (fm *ForwardManager) handleClientConnection(fwd *Forward, targetPeer peer.I
 		return
 	}
 
+	_ = stream.SetDeadline(time.Time{})
 	bridgeConns(clientConn, stream)
 }
 
@@ -247,6 +287,7 @@ func (fm *ForwardManager) Close() {
 // handleTCPForward handles incoming /loom/tcp/1.0.0 streams on the destination peer.
 func (n *Node) handleTCPForward(stream network.Stream) {
 	defer stream.Close()
+	_ = stream.SetDeadline(time.Now().Add(10 * time.Second))
 
 	if !n.enabled.Load() {
 		_ = writeLengthPrefixedJSON(stream, TCPForwardResponse{OK: false, Error: "network is paused"})
@@ -265,7 +306,7 @@ func (n *Node) handleTCPForward(stream network.Stream) {
 		n.mu.RLock()
 		service, ok := n.services[handshake.ServiceID]
 		n.mu.RUnlock()
-		if !ok {
+		if !ok || serviceProtocol(service) != "tcp" {
 			_ = writeLengthPrefixedJSON(stream, TCPForwardResponse{OK: false, Error: "service not found"})
 			return
 		}
@@ -280,15 +321,12 @@ func (n *Node) handleTCPForward(stream network.Stream) {
 			return
 		}
 		dialTarget = extracted
-	} else if handshake.Target != "" {
-		extracted, err := extractHostPort(handshake.Target)
-		if err != nil {
-			_ = writeLengthPrefixedJSON(stream, TCPForwardResponse{OK: false, Error: "invalid target"})
-			return
-		}
-		dialTarget = extracted
 	} else {
-		_ = writeLengthPrefixedJSON(stream, TCPForwardResponse{OK: false, Error: "missing serviceId or target"})
+		_ = writeLengthPrefixedJSON(stream, TCPForwardResponse{Error: "an explicitly published TCP service is required"})
+		return
+	}
+	if handshake.Target != "" {
+		_ = writeLengthPrefixedJSON(stream, TCPForwardResponse{Error: "raw targets are not allowed"})
 		return
 	}
 
@@ -299,10 +337,11 @@ func (n *Node) handleTCPForward(stream network.Stream) {
 	}
 	defer targetConn.Close()
 
-	if err := writeLengthPrefixedJSON(stream, TCPForwardResponse{OK: true}); err != nil {
+	if err := writeLengthPrefixedJSON(stream, TCPForwardResponse{OK: true, Target: dialTarget}); err != nil {
 		return
 	}
 
+	_ = stream.SetDeadline(time.Time{})
 	bridgeConns(targetConn, stream)
 }
 
@@ -335,7 +374,11 @@ func extractHostPort(raw string) (string, error) {
 		}
 	}
 
-	return net.JoinHostPort(host, portStr), nil
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port < 1 || port > 65535 {
+		return "", errors.New("invalid TCP port")
+	}
+	return net.JoinHostPort(host, strconv.Itoa(port)), nil
 }
 
 func writeLengthPrefixedJSON(w io.Writer, val any) error {

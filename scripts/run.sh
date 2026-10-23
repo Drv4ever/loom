@@ -10,12 +10,6 @@ DATA_DIR="${LOOM_DATA_DIR:-$HOME/.loom}"
 BINARY="$ROOT/bin/loom"
 backend_args=(--peer-listen /ip4/0.0.0.0/tcp/4001)
 mode="device"
-if [[ "${1:-}" == "--demo" ]]; then
-	shift
-	mode="local demo"
-	DATA_DIR="${LOOM_DATA_DIR:-$ROOT/.loom-demo}"
-	backend_args=(--demo)
-fi
 
 for command in go bun python3; do
 	if ! command -v "$command" >/dev/null 2>&1; then
@@ -96,7 +90,7 @@ if ! python3 "$ROOT/scripts/wait_http.py" "http://$FRONTEND_HOST:$FRONTEND_PORT/
 	exit 1
 fi
 if ! kill -0 "$frontend_pid" 2>/dev/null || ! kill -0 "$backend_pid" 2>/dev/null; then
-	printf 'A demo process exited before startup completed.\n' >&2
+	printf 'A Loom process exited before startup completed.\n' >&2
 	exit 1
 fi
 

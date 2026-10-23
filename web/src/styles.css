@@ -2269,3 +2269,16 @@ tbody tr:hover {
   color: var(--green);
 }
 
+
+.setup-checklist { padding: 1rem 1.25rem; margin-bottom: 1.25rem; }
+.setup-checklist > div { display: flex; flex-wrap: wrap; gap: 1.25rem; margin-top: .65rem; }
+.peer-access-fields { border: 0; padding: 0; margin: 1.25rem 0; }
+.peer-access-fields label { display: flex; align-items: center; gap: .6rem; margin-top: .65rem; font-size: .875rem; }
+.peer-access-fields input { accent-color: var(--primary, #386be8); }
+.recovery-list { list-style: none; padding: 0; }
+.recovery-list li { display: flex; justify-content: space-between; align-items: center; gap: 1rem; padding: .8rem 0; border-bottom: 1px solid var(--border); }
+.recovery-list small { display: block; margin-top: .3rem; color: var(--muted-foreground); }
+a[aria-disabled="true"] { pointer-events: none; opacity: .4; }
+
+.incoming-share-detail { display: block; margin: .35rem 0; }
+.folder-panels .row-actions { flex-wrap: wrap; }

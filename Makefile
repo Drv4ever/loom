@@ -2,11 +2,11 @@
 
 help:
 	@printf '%s\n' \
-	  'make demo  Start the local demo dashboard and Go mesh' \
+	  'make demo  Start one real demo device (run on both computers)' \
 	  'make run   Start this computer as a real Loom device (dashboard + mesh)' \
-	  'make test  Run the black-box demo API smoke test' \
+	  'make test  Run the single-device API smoke test' \
 	  'make test-peers Run the normal-mode two-peer integration test' \
-	  'make check Run Go, frontend, demo, and normal-mode checks' \
+	  'make check Run Go, frontend, API, and two-peer checks' \
 	  'make build Build the Go backend and production frontend'
 
 demo:

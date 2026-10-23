@@ -96,7 +96,12 @@ func (c *Client) PublishService(ctx context.Context, name, target string, truste
 
 // PublishServiceWithOptions registers a loopback HTTP service with granular peer access control.
 func (c *Client) PublishServiceWithOptions(ctx context.Context, name, target string, trusted bool, allowedPeers []string) (*loom.Service, error) {
+	return c.PublishServiceProtocol(ctx, name, target, "http", trusted, allowedPeers)
+}
+
+func (c *Client) PublishServiceProtocol(ctx context.Context, name, target, protocol string, trusted bool, allowedPeers []string) (*loom.Service, error) {
 	body := map[string]any{
+		"protocol":     protocol,
 		"name":         name,
 		"target":       target,
 		"trusted":      trusted,

@@ -60,6 +60,17 @@ func (a *App) addFolderWithOptions(path, peerID, name string, allowedPeers []str
 	if err != nil || !info.IsDir() {
 		return Folder{}, fmt.Errorf("selected path must be a folder")
 	}
+	if pathsOverlap(resolved, a.dataDir) {
+		return Folder{}, fmt.Errorf("shared folder must be outside Loom data directory")
+	}
+	for _, id := range allowedPeers {
+		if _, err := parsePeerID(id); err != nil {
+			return Folder{}, err
+		}
+	}
+	if len(allowedPeers) > 0 && !containsPeer(allowedPeers, peerID) {
+		return Folder{}, fmt.Errorf("selected device must have folder access")
+	}
 	if _, err := parsePeerID(peerID); err != nil {
 		return Folder{}, err
 	}
@@ -91,7 +102,11 @@ func (a *App) addFolderWithOptions(path, peerID, name string, allowedPeers []str
 		Status:       "pending",
 		AllowedPeers: allowedPeers,
 		ReadOnly:     readOnly,
+		Mode:         modeTwoWay,
 		Manifest:     nil,
+	}
+	if readOnly {
+		folder.Mode = modeSendOnly
 	}
 	a.folders[id] = &folderEntry{Folder: folder, manifest: make(map[string]string)}
 	a.addActivityLocked("sync", "Folder added", fmt.Sprintf("%s is ready to sync with %s.", name, peerInfo.Device.Name))
@@ -182,15 +197,25 @@ func (a *App) finishSync(id string, err error, transferred int64, manifest map[s
 		}
 		entry.Folder.Error = ""
 	} else if err != nil {
+		var response *syncResponseError
+		if errors.As(err, &response) && response.status != "" {
+			entry.Folder.Status = response.status
+			entry.Folder.Error = err.Error()
+			_ = a.persistLocked()
+			return
+		}
+		changed := entry.Folder.Error != err.Error()
 		entry.Folder.Status = "error"
 		entry.Folder.Error = err.Error()
-		a.addActivityLocked("sync", "Folder sync failed", fmt.Sprintf("%s: %s", entry.Folder.Name, err.Error()))
+		if changed {
+			a.addActivityLocked("sync", "Folder sync failed", fmt.Sprintf("%s: %s", entry.Folder.Name, err.Error()))
+		}
 	} else {
 		entry.Folder.Status = "synced"
 		entry.Folder.Error = ""
 	}
-	for name, digest := range manifest {
-		entry.manifest[name] = digest
+	if manifest != nil {
+		entry.manifest = manifest
 	}
 	_ = transferred
 	_ = a.persistLocked()
@@ -202,6 +227,13 @@ func scanFolder(rootPath string) (map[string]fileDescriptor, int64, error) {
 		return nil, 0, err
 	}
 	defer root.Close()
+	info, err := os.Lstat(rootPath)
+	if err != nil {
+		return nil, 0, err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, 0, fmt.Errorf("shared root is no longer a regular directory")
+	}
 	files := make(map[string]fileDescriptor)
 	var total int64
 	matcher := LoadIgnoreMatcher(rootPath)
@@ -243,6 +275,12 @@ func scanFolder(rootPath string) (map[string]fileDescriptor, int64, error) {
 		if !info.Mode().IsRegular() {
 			return nil
 		}
+		if info.Size() > maxFileSize {
+			return fmt.Errorf("%s exceeds the 100 MiB transfer limit", name)
+		}
+		if len(files) >= maxSyncFiles {
+			return fmt.Errorf("folder exceeds the file count limit")
+		}
 		file, err := root.Open(filepath.FromSlash(name))
 		if err != nil {
 			return err
@@ -260,6 +298,9 @@ func scanFolder(rootPath string) (map[string]fileDescriptor, int64, error) {
 			return fmt.Errorf("%s changed while it was being scanned", name)
 		}
 		total += read
+		if total > 1<<30 {
+			return fmt.Errorf("folder exceeds the 1 GiB scan limit")
+		}
 		files[name] = fileDescriptor{Path: name, Size: read, ModTime: info.ModTime(), SHA256: hex.EncodeToString(hash.Sum(nil))}
 		return nil
 	})
