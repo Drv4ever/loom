@@ -1,7 +1,12 @@
 .loom*/
+
+*.key
+.tools/
+
 bin/
 artifacts/
 *.log
 .DS_Store
 __pycache__/
 *.py[cod]
+*.exe

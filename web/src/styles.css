@@ -2149,3 +2149,123 @@ tbody tr:hover {
     transition-duration: 0.01ms !important;
   }
 }
+
+.conflict-badge-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  margin-top: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: #8c5300;
+  background: #fff4d9;
+  border: 1px solid #ffd480;
+  border-radius: 9999px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.conflict-badge-btn:hover {
+  background: #ffe8b3;
+  border-color: #f5a623;
+}
+
+.app-dialog.dialog-wide {
+  width: min(100% - 32px, 640px);
+  max-width: 640px;
+}
+
+.conflicts-summary {
+  font-size: 13px;
+  color: var(--muted-foreground);
+  margin: 0 0 14px;
+  line-height: 1.4;
+}
+
+.conflict-card {
+  padding: 12px 14px;
+  margin-bottom: 12px;
+  background: #fbfbfc;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.conflict-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+  gap: 8px;
+}
+
+.conflict-file-path {
+  font-size: 13.5px;
+  color: var(--ink);
+  word-break: break-all;
+}
+
+.conflict-device-badge {
+  font-size: 11px;
+  color: var(--muted-foreground);
+  background: #edeef1;
+  padding: 2px 7px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.conflict-meta-split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 9px 11px;
+  background: #ffffff;
+  border: 1px solid #ebebf0;
+  border-radius: 6px;
+}
+
+.conflict-version-col {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.version-tag {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  color: #6c707a;
+}
+
+.version-info {
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+.conflict-copy-path {
+  font-size: 11px;
+  color: #8c5300;
+  word-break: break-all;
+  margin-top: 2px;
+}
+
+.conflict-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.conflicts-empty {
+  text-align: center;
+  padding: 24px 12px;
+}
+
+.conflicts-empty svg {
+  margin: 0 auto 10px;
+  color: var(--green);
+}
+
